@@ -3851,6 +3851,10 @@ static inline int ext4_buffer_uptodate(struct buffer_head *bh)
 	return buffer_uptodate(bh);
 }
 
+#ifdef CONFIG_EXT4_DJPLUS
+extern int ext4djp_writepage_trans_blocks(struct inode *inode, size_t cnt);
+#endif
+
 #endif	/* __KERNEL__ */
 
 #define EFSBADCRC	EBADMSG		/* Bad CRC detected */

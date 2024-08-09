@@ -1280,6 +1280,76 @@ retry_journal:
 	return ret;
 }
 
+/**
+ * @brief EXT4 Data Journaling Plus API
+ * 
+ */
+#ifdef CONFIG_EXT4_DJPLUS
+
+static int ext4djp_write_begin(struct file *file, struct address_space *mapping,
+			    loff_t pos, unsigned len,
+			    struct page **pagep, void **fsdata)
+{
+	struct inode *inode = mapping->host;
+	int ret;
+	struct page *page;
+	pgoff_t index;
+	unsigned from, to;
+
+	if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb))))
+		return -EIO;
+
+	trace_ext4_write_begin(inode, pos, len);
+
+	index = pos >> PAGE_SHIFT;
+	from = pos & (PAGE_SIZE - 1);
+	to = from + len;
+
+	if (ext4_test_inode_state(inode, EXT4_STATE_MAY_INLINE_DATA)) {
+		printk(KERN_ERR "[%s] djp not support inline data\n", __func__);
+		return -EIO;
+	}
+
+	/* page grab하는게 memory pressure 상황에서 오래걸릴 수 있다고 함 (maybe writeback?)
+	 * handle을 놓는 것이 더 오래걸릴 수 있음 */
+retry_grab:
+	page = grab_cache_page_write_begin(mapping, index);
+	if (!page)
+		return -ENOMEM;
+
+	if (!page_has_buffers(page))
+		create_empty_buffers(page, inode->i_sb->s_blocksize, 0);
+
+	if (page->mapping != mapping) {
+		/* The page got truncated from under us */
+		unlock_page(page);
+		put_page(page);
+		goto retry_grab;
+	}
+	/* In case writeback began while the page was unlocked */
+	wait_for_stable_page(page);
+
+	// TODO: change to delayed allocation enabled selective journaling
+	ret = __block_write_begin(page, pos, len, ext4_get_block);
+
+	if (!ret) {
+		BUG_ON(!ext4_should_journal_data(inode));
+		ret = ext4_walk_page_buffers(journal_current_handle(), inode,
+					     page_buffers(page), from, to, NULL,
+					     do_journal_get_write_access);
+	}
+
+	if (ret) {
+		printk(KERN_ERR "[%s] not implemented yet error code(%d)\n", __func__, ret);
+		unlock_page(page);
+		put_page(page);
+		return ret;
+	}
+	*pagep = page;
+	return ret;
+}
+#endif
+
 /* For write_end() in data=journal mode */
 static int write_end_fn(handle_t *handle, struct inode *inode,
 			struct buffer_head *bh)
@@ -1368,6 +1438,86 @@ static int ext4_write_end(struct file *file,
 	return ret ? ret : copied;
 }
 
+#ifdef CONFIG_EXT4_DJPLUS
+
+static int ext4djp_journalled_write_end(struct file *file,
+				     struct address_space *mapping,
+				     loff_t pos, unsigned len, unsigned copied,
+				     struct page *page, void *fsdata)
+{
+	handle_t *handle = ext4_journal_current_handle();
+	struct inode *inode = mapping->host;
+	loff_t old_size = inode->i_size;
+	int ret = 0, ret2;
+	int partial = 0;
+	unsigned from, to;
+	int size_changed = 0;
+	bool verity = ext4_verity_in_progress(inode);
+
+	trace_ext4_journalled_write_end(inode, pos, len, copied);
+	from = pos & (PAGE_SIZE - 1);
+	to = from + len;
+
+	BUG_ON(!ext4_handle_valid(handle));
+
+	if (ext4_has_inline_data(inode)) {
+		printk(KERN_ERR "[%s] not support inline data\n", __func__);
+		return -EIO;
+	}
+
+	if (unlikely(copied < len) && !PageUptodate(page)) {
+		printk(KERN_ERR "[%s] not implemented yet\n", __func__);
+		return -EIO;
+	} else {
+		if (unlikely(copied < len)) {
+			printk(KERN_ERR "[%s] not implemented yet\n", __func__);
+			return -EIO;
+		}
+
+		ret = ext4_walk_page_buffers(handle, inode, page_buffers(page),
+					     from, from + copied, &partial,
+					     write_end_fn);
+		if (!partial)
+			SetPageUptodate(page);
+	}
+	if (!verity)
+		size_changed = ext4_update_inode_size(inode, pos + copied);
+	ext4_set_inode_state(inode, EXT4_STATE_JDATA);
+	EXT4_I(inode)->i_datasync_tid = handle->h_transaction->t_tid;
+	unlock_page(page);
+	put_page(page);
+
+	if (old_size < pos && !verity)
+		pagecache_isize_extended(inode, old_size, pos);
+
+	if (size_changed) {
+		ret2 = ext4_mark_inode_dirty(handle, inode);
+		if (!ret)
+			ret = ret2;
+	}
+
+	if (pos + len > inode->i_size && !verity && ext4_can_truncate(inode))
+		/* if we have allocated more blocks and copied
+		 * less. We will have blocks allocated outside
+		 * inode->i_size. So truncate them
+		 */
+		ext4_orphan_add(handle, inode);
+
+	if (pos + len > inode->i_size && !verity) {
+		ext4_truncate_failed_write(inode);
+		/*
+		 * If truncate failed early the inode might still be
+		 * on the orphan list; we need to make sure the inode
+		 * is removed from the orphan list in that case.
+		 */
+		if (inode->i_nlink)
+			ext4_orphan_del(NULL, inode);
+	}
+
+	return ret ? ret : copied;
+}
+#else
+
 /*
  * This is a private version of page_zero_new_buffers() which doesn't
  * set the buffer to be dirty, since in data=journalled mode we need
@@ -1402,6 +1552,7 @@ static void ext4_journalled_zero_new_buffers(handle_t *handle,
 		bh = bh->b_this_page;
 	} while (bh != head);
 }
+
 
 static int ext4_journalled_write_end(struct file *file,
 				     struct address_space *mapping,
@@ -1478,6 +1629,8 @@ static int ext4_journalled_write_end(struct file *file,
 
 	return ret ? ret : copied;
 }
+
+#endif
 
 /*
  * Reserve space for a single cluster
@@ -1897,6 +2050,10 @@ static int __ext4_journalled_writepage(struct page *page,
 	int inline_data = ext4_has_inline_data(inode);
 	struct buffer_head *inode_bh = NULL;
 	loff_t size;
+
+#ifdef CONFIG_EXT4_DJPLUS
+	// SetPageChecked called on ext4_journalled_dirty_folio(), only for mmapped file
+#endif
 
 	ClearPageChecked(page);
 
@@ -3743,8 +3900,13 @@ static const struct address_space_operations ext4_journalled_aops = {
 	.read_folio		= ext4_read_folio,
 	.readahead		= ext4_readahead,
 	.writepages		= ext4_writepages,
+#ifdef CONFIG_EXT4_DJPLUS
+	.write_begin		= ext4djp_write_begin,
+	.write_end		= ext4djp_journalled_write_end,
+#else
 	.write_begin		= ext4_write_begin,
 	.write_end		= ext4_journalled_write_end,
+#endif
 	.dirty_folio		= ext4_journalled_dirty_folio,
 	.bmap			= ext4_bmap,
 	.invalidate_folio	= ext4_journalled_invalidate_folio,
@@ -5845,6 +6007,18 @@ int ext4_writepage_trans_blocks(struct inode *inode)
 		ret += bpp;
 	return ret;
 }
+
+#ifdef CONFIG_EXT4_DJPLUS
+int ext4djp_writepage_trans_blocks(struct inode *inode, size_t cnt)
+{
+	int block_size = 1 << inode->i_sb->s_blocksize_bits;
+	int ret = ext4_writepage_trans_blocks(inode);
+
+	ret += (cnt + block_size - 1) / block_size;
+
+	return ret;
+}
+#endif
 
 /*
  * Calculate the journal credits for a chunk of data modification.
