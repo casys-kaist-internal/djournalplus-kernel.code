@@ -1055,6 +1055,33 @@ int do_journal_get_write_access(handle_t *handle, struct inode *inode,
 	return ret;
 }
 
+int djp_do_journal_get_write_access(handle_t *handle, struct inode *inode,
+				struct buffer_head *bh)
+{
+	// (junbong): Copy from do_journal_get_write_access
+	int dirty = buffer_dirty(bh);
+	int ret;
+
+	if (!buffer_mapped(bh) || buffer_freed(bh))
+		return 0;
+	/*
+	 * __block_write_begin() could have dirtied some buffers. Clean
+	 * the dirty bit as jbd2_journal_get_write_access() could complain
+	 * otherwise about fs integrity issues. Setting of the dirty bit
+	 * by __block_write_begin() isn't a real problem here as we clear
+	 * the bit before releasing a page lock and thus writeback cannot
+	 * ever write the buffer.
+	 */
+	if (dirty)
+		clear_buffer_dirty(bh);
+	BUFFER_TRACE(bh, "get write access");
+	ret = ext4_journal_get_write_access(handle, inode->i_sb, bh,
+					    EXT4_JTR_NONE);
+	if (!ret && dirty)
+		ret = ext4_handle_dirty_metadata(handle, NULL, bh);
+	return ret;
+}
+
 #ifdef CONFIG_FS_ENCRYPTION
 static int ext4_block_write_begin(struct page *page, loff_t pos, unsigned len,
 				  get_block_t *get_block)
@@ -1153,6 +1180,138 @@ static int ext4_write_begin(struct file *file, struct address_space *mapping,
 			    loff_t pos, unsigned len,
 			    struct page **pagep, void **fsdata)
 {
+	struct inode *inode = mapping->host;
+	int ret, needed_blocks;
+	handle_t *handle;
+	int retries = 0;
+	struct page *page;
+	pgoff_t index;
+	unsigned from, to;
+
+	if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb))))
+		return -EIO;
+
+	trace_ext4_write_begin(inode, pos, len);
+	/*
+	 * Reserve one block more for addition to orphan list in case
+	 * we allocate blocks but write fails for some reason
+	 */
+	needed_blocks = ext4_writepage_trans_blocks(inode) + 1;
+	index = pos >> PAGE_SHIFT;
+	from = pos & (PAGE_SIZE - 1);
+	to = from + len;
+
+	if (ext4_test_inode_state(inode, EXT4_STATE_MAY_INLINE_DATA)) {
+		ret = ext4_try_to_write_inline_data(mapping, inode, pos, len,
+						    pagep);
+		if (ret < 0)
+			return ret;
+		if (ret == 1)
+			return 0;
+	}
+
+	/*
+	 * grab_cache_page_write_begin() can take a long time if the
+	 * system is thrashing due to memory pressure, or if the page
+	 * is being written back.  So grab it first before we start
+	 * the transaction handle.  This also allows us to allocate
+	 * the page (if needed) without using GFP_NOFS.
+	 */
+retry_grab:
+	page = grab_cache_page_write_begin(mapping, index);
+	if (!page)
+		return -ENOMEM;
+	/*
+	 * The same as page allocation, we prealloc buffer heads before
+	 * starting the handle.
+	 */
+	if (!page_has_buffers(page))
+		create_empty_buffers(page, inode->i_sb->s_blocksize, 0);
+
+	unlock_page(page);
+
+retry_journal:
+	handle = ext4_journal_start(inode, EXT4_HT_WRITE_PAGE, needed_blocks);
+	if (IS_ERR(handle)) {
+		put_page(page);
+		return PTR_ERR(handle);
+	}
+
+	lock_page(page);
+	if (page->mapping != mapping) {
+		/* The page got truncated from under us */
+		unlock_page(page);
+		put_page(page);
+		ext4_journal_stop(handle);
+		goto retry_grab;
+	}
+	/* In case writeback began while the page was unlocked */
+	wait_for_stable_page(page);
+
+#ifdef CONFIG_FS_ENCRYPTION
+	if (ext4_should_dioread_nolock(inode))
+		ret = ext4_block_write_begin(page, pos, len,
+					     ext4_get_block_unwritten);
+	else
+		ret = ext4_block_write_begin(page, pos, len,
+					     ext4_get_block);
+#else
+	if (ext4_should_dioread_nolock(inode))
+		ret = __block_write_begin(page, pos, len,
+					  ext4_get_block_unwritten);
+	else
+		ret = __block_write_begin(page, pos, len, ext4_get_block);
+#endif
+	if (!ret && ext4_should_journal_data(inode)) {
+		ret = ext4_walk_page_buffers(handle, inode,
+					     page_buffers(page), from, to, NULL,
+					     do_journal_get_write_access);
+	}
+
+	if (ret) {
+		bool extended = (pos + len > inode->i_size) &&
+				!ext4_verity_in_progress(inode);
+
+		unlock_page(page);
+		/*
+		 * __block_write_begin may have instantiated a few blocks
+		 * outside i_size.  Trim these off again. Don't need
+		 * i_size_read because we hold i_rwsem.
+		 *
+		 * Add inode to orphan list in case we crash before
+		 * truncate finishes
+		 */
+		if (extended && ext4_can_truncate(inode))
+			ext4_orphan_add(handle, inode);
+
+		ext4_journal_stop(handle);
+		if (extended) {
+			ext4_truncate_failed_write(inode);
+			/*
+			 * If truncate failed early the inode might
+			 * still be on the orphan list; we need to
+			 * make sure the inode is removed from the
+			 * orphan list in that case.
+			 */
+			if (inode->i_nlink)
+				ext4_orphan_del(NULL, inode);
+		}
+
+		if (ret == -ENOSPC &&
+		    ext4_should_retry_alloc(inode->i_sb, &retries))
+			goto retry_journal;
+		put_page(page);
+		return ret;
+	}
+	*pagep = page;
+	return ret;
+}
+
+static int ext4djp_write_begin(struct file *file, struct address_space *mapping,
+			    loff_t pos, unsigned len,
+			    struct page **pagep, void **fsdata)
+{
+	// (junbong): Copy from ext4_write_begin
 	struct inode *inode = mapping->host;
 	int ret, needed_blocks;
 	handle_t *handle;
@@ -1403,11 +1562,12 @@ static void ext4_journalled_zero_new_buffers(handle_t *handle,
 	} while (bh != head);
 }
 
-static int ext4_journalled_write_end(struct file *file,
+static int ext4djp_journalled_write_end(struct file *file,
 				     struct address_space *mapping,
 				     loff_t pos, unsigned len, unsigned copied,
 				     struct page *page, void *fsdata)
 {
+	// (junbong): Rename from ext4_journalled_write_end
 	handle_t *handle = ext4_journal_current_handle();
 	struct inode *inode = mapping->host;
 	loff_t old_size = inode->i_size;
@@ -1417,7 +1577,7 @@ static int ext4_journalled_write_end(struct file *file,
 	int size_changed = 0;
 	bool verity = ext4_verity_in_progress(inode);
 
-	trace_ext4_journalled_write_end(inode, pos, len, copied);
+	trace_ext4djp_journalled_write_end(inode, pos, len, copied);
 	from = pos & (PAGE_SIZE - 1);
 	to = from + len;
 
@@ -2718,6 +2878,236 @@ static int ext4_writepage_cb(struct page *page, struct writeback_control *wbc,
 	return ext4_writepage(page, wbc);
 }
 
+static int ext4djp_do_writepages(struct mpage_da_data *mpd)
+{
+	// (junbong): Copy from ext4_do_writepages
+	struct writeback_control *wbc = mpd->wbc;
+	pgoff_t	writeback_index = 0;
+	long nr_to_write = wbc->nr_to_write;
+	int range_whole = 0;
+	int cycled = 1;
+	handle_t *handle = NULL;
+	struct inode *inode = mpd->inode;
+	struct address_space *mapping = inode->i_mapping;
+	int needed_blocks, rsv_blocks = 0, ret = 0;
+	struct ext4_sb_info *sbi = EXT4_SB(mapping->host->i_sb);
+	struct blk_plug plug;
+	bool give_up_on_write = false;
+
+	trace_ext4_writepages(inode, wbc);
+
+	/*
+	 * No pages to write? This is mainly a kludge to avoid starting
+	 * a transaction for special inodes like journal inode on last iput()
+	 * because that could violate lock ordering on umount
+	 */
+	if (!mapping->nrpages || !mapping_tagged(mapping, PAGECACHE_TAG_DIRTY))
+		goto out_writepages;
+
+	if (ext4_should_journal_data(inode)) {
+		blk_start_plug(&plug);
+		ret = write_cache_pages(mapping, wbc, ext4_writepage_cb, NULL);
+		blk_finish_plug(&plug);
+		goto out_writepages;
+	}
+
+	/*
+	 * If the filesystem has aborted, it is read-only, so return
+	 * right away instead of dumping stack traces later on that
+	 * will obscure the real source of the problem.  We test
+	 * EXT4_MF_FS_ABORTED instead of sb->s_flag's SB_RDONLY because
+	 * the latter could be true if the filesystem is mounted
+	 * read-only, and in that case, ext4_writepages should
+	 * *never* be called, so if that ever happens, we would want
+	 * the stack trace.
+	 */
+	if (unlikely(ext4_forced_shutdown(EXT4_SB(mapping->host->i_sb)) ||
+		     ext4_test_mount_flag(inode->i_sb, EXT4_MF_FS_ABORTED))) {
+		ret = -EROFS;
+		goto out_writepages;
+	}
+
+	/*
+	 * If we have inline data and arrive here, it means that
+	 * we will soon create the block for the 1st page, so
+	 * we'd better clear the inline data here.
+	 */
+	if (ext4_has_inline_data(inode)) {
+		/* Just inode will be modified... */
+		handle = ext4_journal_start(inode, EXT4_HT_INODE, 1);
+		if (IS_ERR(handle)) {
+			ret = PTR_ERR(handle);
+			goto out_writepages;
+		}
+		BUG_ON(ext4_test_inode_state(inode,
+				EXT4_STATE_MAY_INLINE_DATA));
+		ext4_destroy_inline_data(handle, inode);
+		ext4_journal_stop(handle);
+	}
+
+	if (ext4_should_dioread_nolock(inode)) {
+		/*
+		 * We may need to convert up to one extent per block in
+		 * the page and we may dirty the inode.
+		 */
+		rsv_blocks = 1 + ext4_chunk_trans_blocks(inode,
+						PAGE_SIZE >> inode->i_blkbits);
+	}
+
+	if (wbc->range_start == 0 && wbc->range_end == LLONG_MAX)
+		range_whole = 1;
+
+	if (wbc->range_cyclic) {
+		writeback_index = mapping->writeback_index;
+		if (writeback_index)
+			cycled = 0;
+		mpd->first_page = writeback_index;
+		mpd->last_page = -1;
+	} else {
+		mpd->first_page = wbc->range_start >> PAGE_SHIFT;
+		mpd->last_page = wbc->range_end >> PAGE_SHIFT;
+	}
+
+	ext4_io_submit_init(&mpd->io_submit, wbc);
+retry:
+	if (wbc->sync_mode == WB_SYNC_ALL || wbc->tagged_writepages)
+		tag_pages_for_writeback(mapping, mpd->first_page,
+					mpd->last_page);
+	blk_start_plug(&plug);
+
+	/*
+	 * First writeback pages that don't need mapping - we can avoid
+	 * starting a transaction unnecessarily and also avoid being blocked
+	 * in the block layer on device congestion while having transaction
+	 * started.
+	 */
+	mpd->do_map = 0;
+	mpd->scanned_until_end = 0;
+	mpd->io_submit.io_end = ext4_init_io_end(inode, GFP_KERNEL);
+	if (!mpd->io_submit.io_end) {
+		ret = -ENOMEM;
+		goto unplug;
+	}
+	ret = mpage_prepare_extent_to_map(mpd);
+	/* Unlock pages we didn't use */
+	mpage_release_unused_pages(mpd, false);
+	/* Submit prepared bio */
+	ext4_io_submit(&mpd->io_submit);
+	ext4_put_io_end_defer(mpd->io_submit.io_end);
+	mpd->io_submit.io_end = NULL;
+	if (ret < 0)
+		goto unplug;
+
+	while (!mpd->scanned_until_end && wbc->nr_to_write > 0) {
+		/* For each extent of pages we use new io_end */
+		mpd->io_submit.io_end = ext4_init_io_end(inode, GFP_KERNEL);
+		if (!mpd->io_submit.io_end) {
+			ret = -ENOMEM;
+			break;
+		}
+
+		WARN_ON_ONCE(!mpd->can_map);
+		/*
+		 * We have two constraints: We find one extent to map and we
+		 * must always write out whole page (makes a difference when
+		 * blocksize < pagesize) so that we don't block on IO when we
+		 * try to write out the rest of the page. Journalled mode is
+		 * not supported by delalloc.
+		 */
+		BUG_ON(ext4_should_journal_data(inode));
+		needed_blocks = ext4_da_writepages_trans_blocks(inode);
+
+		/* start a new transaction */
+		handle = ext4_journal_start_with_reserve(inode,
+				EXT4_HT_WRITE_PAGE, needed_blocks, rsv_blocks);
+		if (IS_ERR(handle)) {
+			ret = PTR_ERR(handle);
+			ext4_msg(inode->i_sb, KERN_CRIT, "%s: jbd2_start: "
+			       "%ld pages, ino %lu; err %d", __func__,
+				wbc->nr_to_write, inode->i_ino, ret);
+			/* Release allocated io_end */
+			ext4_put_io_end(mpd->io_submit.io_end);
+			mpd->io_submit.io_end = NULL;
+			break;
+		}
+		mpd->do_map = 1;
+
+		trace_ext4_da_write_pages(inode, mpd->first_page, wbc);
+		ret = mpage_prepare_extent_to_map(mpd);
+		if (!ret && mpd->map.m_len)
+			ret = mpage_map_and_submit_extent(handle, mpd,
+					&give_up_on_write);
+		/*
+		 * Caution: If the handle is synchronous,
+		 * ext4_journal_stop() can wait for transaction commit
+		 * to finish which may depend on writeback of pages to
+		 * complete or on page lock to be released.  In that
+		 * case, we have to wait until after we have
+		 * submitted all the IO, released page locks we hold,
+		 * and dropped io_end reference (for extent conversion
+		 * to be able to complete) before stopping the handle.
+		 */
+		if (!ext4_handle_valid(handle) || handle->h_sync == 0) {
+			ext4_journal_stop(handle);
+			handle = NULL;
+			mpd->do_map = 0;
+		}
+		/* Unlock pages we didn't use */
+		mpage_release_unused_pages(mpd, give_up_on_write);
+		/* Submit prepared bio */
+		ext4_io_submit(&mpd->io_submit);
+
+		/*
+		 * Drop our io_end reference we got from init. We have
+		 * to be careful and use deferred io_end finishing if
+		 * we are still holding the transaction as we can
+		 * release the last reference to io_end which may end
+		 * up doing unwritten extent conversion.
+		 */
+		if (handle) {
+			ext4_put_io_end_defer(mpd->io_submit.io_end);
+			ext4_journal_stop(handle);
+		} else
+			ext4_put_io_end(mpd->io_submit.io_end);
+		mpd->io_submit.io_end = NULL;
+
+		if (ret == -ENOSPC && sbi->s_journal) {
+			/*
+			 * Commit the transaction which would
+			 * free blocks released in the transaction
+			 * and try again
+			 */
+			jbd2_journal_force_commit_nested(sbi->s_journal);
+			ret = 0;
+			continue;
+		}
+		/* Fatal error - ENOMEM, EIO... */
+		if (ret)
+			break;
+	}
+unplug:
+	blk_finish_plug(&plug);
+	if (!ret && !cycled && wbc->nr_to_write > 0) {
+		cycled = 1;
+		mpd->last_page = writeback_index - 1;
+		mpd->first_page = 0;
+		goto retry;
+	}
+
+	/* Update index */
+	if (wbc->range_cyclic || (range_whole && wbc->nr_to_write > 0))
+		/*
+		 * Set the writeback_index so that range_cyclic
+		 * mode will write it back later
+		 */
+		mapping->writeback_index = mpd->first_page;
+
+out_writepages:
+	trace_ext4_writepages_result(inode, wbc, ret,
+				     nr_to_write - wbc->nr_to_write);
+	return ret;
+}
+
 static int ext4_do_writepages(struct mpage_da_data *mpd)
 {
 	struct writeback_control *wbc = mpd->wbc;
@@ -2944,6 +3334,28 @@ unplug:
 out_writepages:
 	trace_ext4_writepages_result(inode, wbc, ret,
 				     nr_to_write - wbc->nr_to_write);
+	return ret;
+}
+
+static int ext4djp_writepages(struct address_space *mapping,
+			   struct writeback_control *wbc)
+{
+	// (junbong): Copy from ext4_writepages
+	struct super_block *sb = mapping->host->i_sb;
+	struct mpage_da_data mpd = {
+		.inode = mapping->host,
+		.wbc = wbc,
+		.can_map = 1,
+	};
+	int ret;
+
+	if (unlikely(ext4_forced_shutdown(EXT4_SB(sb))))
+		return -EIO;
+
+	percpu_down_read(&EXT4_SB(sb)->s_writepages_rwsem);
+	ret = ext4_do_writepages(&mpd);
+	percpu_up_read(&EXT4_SB(sb)->s_writepages_rwsem);
+
 	return ret;
 }
 
@@ -3742,9 +4154,9 @@ static const struct address_space_operations ext4_aops = {
 static const struct address_space_operations ext4_journalled_aops = {
 	.read_folio		= ext4_read_folio,
 	.readahead		= ext4_readahead,
-	.writepages		= ext4_writepages,
-	.write_begin		= ext4_write_begin,
-	.write_end		= ext4_journalled_write_end,
+	.writepages		= ext4djp_writepages,
+	.write_begin		= ext4djp_write_begin,
+	.write_end		= ext4djp_journalled_write_end,
 	.dirty_folio		= ext4_journalled_dirty_folio,
 	.bmap			= ext4_bmap,
 	.invalidate_folio	= ext4_journalled_invalidate_folio,
