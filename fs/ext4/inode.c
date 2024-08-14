@@ -49,6 +49,12 @@
 
 #include <trace/events/ext4.h>
 
+// (junbong): For calling from ext4djp_journalled_write_end
+static int ext4_da_write_end(struct file *file,
+			     struct address_space *mapping,
+			     loff_t pos, unsigned len, unsigned copied,
+			     struct page *page, void *fsdata);
+
 static __u32 ext4_inode_csum(struct inode *inode, struct ext4_inode *raw,
 			      struct ext4_inode_info *ei)
 {
@@ -1062,6 +1068,17 @@ int djp_do_journal_get_write_access(handle_t *handle, struct inode *inode,
 	int dirty = buffer_dirty(bh);
 	int ret;
 
+	if (buffer_delay(bh)) {
+		/*
+		 * (junbong): We don't want to journal dealloc blocks(selective journalling).
+		 * But we have to ensure that the data is allocated and written in this transaction,
+		 * so add to running transacion's inode list
+		 * TODO: Implement alloc on commit
+		 */
+		// return ext4_jbd2_inode_add_write(handle, inode, page_offset(bh->b_page) + bh_offset(bh), bh->b_size);
+		return 0;
+	}
+
 	if (!buffer_mapped(bh) || buffer_freed(bh))
 		return 0;
 	/*
@@ -1323,17 +1340,20 @@ static int ext4djp_write_begin(struct file *file, struct address_space *mapping,
 	if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb))))
 		return -EIO;
 
-	trace_ext4_write_begin(inode, pos, len);
+	trace_ext4djp_write_begin(inode, pos, len);
 	/*
 	 * Reserve one block more for addition to orphan list in case
 	 * we allocate blocks but write fails for some reason
 	 */
+	// TODO(junbong): Adjust if we don't need to journal data
 	needed_blocks = ext4_writepage_trans_blocks(inode) + 1;
 	index = pos >> PAGE_SHIFT;
 	from = pos & (PAGE_SIZE - 1);
 	to = from + len;
 
 	if (ext4_test_inode_state(inode, EXT4_STATE_MAY_INLINE_DATA)) {
+		// (junbong): We do not handle inode inline data case.
+		BUG();
 		ret = ext4_try_to_write_inline_data(mapping, inode, pos, len,
 						    pagep);
 		if (ret < 0)
@@ -1388,20 +1408,26 @@ retry_journal:
 		ret = ext4_block_write_begin(page, pos, len,
 					     ext4_get_block);
 #else
-	if (ext4_should_dioread_nolock(inode))
+	if (ext4_should_dioread_nolock(inode)) {
+		// (junbong): We do not handle dio case.
+		BUG();
 		ret = __block_write_begin(page, pos, len,
 					  ext4_get_block_unwritten);
+	}
 	else
-		ret = __block_write_begin(page, pos, len, ext4_get_block);
+		ret = __block_write_begin(page, pos, len, ext4_da_get_block_prep);
 #endif
 	if (!ret && ext4_should_journal_data(inode)) {
 		ret = ext4_walk_page_buffers(handle, inode,
 					     page_buffers(page), from, to, NULL,
-					     do_journal_get_write_access);
+					     djp_do_journal_get_write_access);
 	}
 
 	if (ret) {
-		bool extended = (pos + len > inode->i_size) &&
+		bool extended;
+		// (junbong): We do not handle this case.
+		BUG();
+		extended = (pos + len > inode->i_size) &&
 				!ext4_verity_in_progress(inode);
 
 		unlock_page(page);
@@ -1443,11 +1469,12 @@ retry_journal:
 static int write_end_fn(handle_t *handle, struct inode *inode,
 			struct buffer_head *bh)
 {
-	int ret;
+	int ret = 0;
 	if (!buffer_mapped(bh) || buffer_freed(bh))
 		return 0;
 	set_buffer_uptodate(bh);
-	ret = ext4_handle_dirty_metadata(handle, NULL, bh);
+	if (!buffer_delay(bh))
+		ret = ext4_handle_dirty_metadata(handle, NULL, bh);
 	clear_buffer_meta(bh);
 	clear_buffer_prio(bh);
 	return ret;
@@ -1576,6 +1603,13 @@ static int ext4djp_journalled_write_end(struct file *file,
 	unsigned from, to;
 	int size_changed = 0;
 	bool verity = ext4_verity_in_progress(inode);
+
+	if (buffer_delay(page_buffers(page))) {
+		// (junbong): We should stop this handle(started at ext4djp_write_begin)
+		// TODO: we may handle this case in ext4_da_write_end
+		ext4_journal_stop(handle);
+		return ext4_da_write_end(file, mapping, pos, len, copied, page, fsdata);
+	}
 
 	trace_ext4djp_journalled_write_end(inode, pos, len, copied);
 	from = pos & (PAGE_SIZE - 1);
@@ -2904,12 +2938,12 @@ static int ext4djp_do_writepages(struct mpage_da_data *mpd)
 	if (!mapping->nrpages || !mapping_tagged(mapping, PAGECACHE_TAG_DIRTY))
 		goto out_writepages;
 
-	if (ext4_should_journal_data(inode)) {
-		blk_start_plug(&plug);
-		ret = write_cache_pages(mapping, wbc, ext4_writepage_cb, NULL);
-		blk_finish_plug(&plug);
-		goto out_writepages;
-	}
+	// if (ext4_should_journal_data(inode)) {
+	// 	blk_start_plug(&plug);
+	// 	ret = write_cache_pages(mapping, wbc, ext4_writepage_cb, NULL);
+	// 	blk_finish_plug(&plug);
+	// 	goto out_writepages;
+	// }
 
 	/*
 	 * If the filesystem has aborted, it is read-only, so return
@@ -2981,6 +3015,7 @@ retry:
 	 * in the block layer on device congestion while having transaction
 	 * started.
 	 */
+	// TODO(junbong): We have to make sure partial writes are not written to disk here.
 	mpd->do_map = 0;
 	mpd->scanned_until_end = 0;
 	mpd->io_submit.io_end = ext4_init_io_end(inode, GFP_KERNEL);
@@ -3014,7 +3049,7 @@ retry:
 		 * try to write out the rest of the page. Journalled mode is
 		 * not supported by delalloc.
 		 */
-		BUG_ON(ext4_should_journal_data(inode));
+		// BUG_ON(ext4_should_journal_data(inode));
 		needed_blocks = ext4_da_writepages_trans_blocks(inode);
 
 		/* start a new transaction */
@@ -3353,7 +3388,7 @@ static int ext4djp_writepages(struct address_space *mapping,
 		return -EIO;
 
 	percpu_down_read(&EXT4_SB(sb)->s_writepages_rwsem);
-	ret = ext4_do_writepages(&mpd);
+	ret = ext4djp_do_writepages(&mpd);
 	percpu_up_read(&EXT4_SB(sb)->s_writepages_rwsem);
 
 	return ret;
