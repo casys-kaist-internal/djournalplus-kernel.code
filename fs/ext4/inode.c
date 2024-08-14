@@ -1497,8 +1497,42 @@ static int ext4_write_end(struct file *file,
 	return ret ? ret : copied;
 }
 
-#ifdef CONFIG_EXT4_DJPLUS
+/*
+ * This is a private version of page_zero_new_buffers() which doesn't
+ * set the buffer to be dirty, since in data=journalled mode we need
+ * to call ext4_handle_dirty_metadata() instead.
+ */
+static void ext4_journalled_zero_new_buffers(handle_t *handle,
+					    struct inode *inode,
+					    struct page *page,
+					    unsigned from, unsigned to)
+{
+	unsigned int block_start = 0, block_end;
+	struct buffer_head *head, *bh;
 
+	bh = head = page_buffers(page);
+	do {
+		block_end = block_start + bh->b_size;
+		if (buffer_new(bh)) {
+			if (block_end > from && block_start < to) {
+				if (!PageUptodate(page)) {
+					unsigned start, size;
+
+					start = max(from, block_start);
+					size = min(to, block_end) - start;
+
+					zero_user(page, start, size);
+					write_end_fn(handle, inode, bh);
+				}
+				clear_buffer_new(bh);
+			}
+		}
+		block_start = block_end;
+		bh = bh->b_this_page;
+	} while (bh != head);
+}
+
+#ifdef CONFIG_EXT4_DJPLUS
 static int ext4djp_journalled_write_end(struct file *file,
 				     struct address_space *mapping,
 				     loff_t pos, unsigned len, unsigned copied,
@@ -1516,7 +1550,6 @@ static int ext4djp_journalled_write_end(struct file *file,
 	if (buffer_delay(page_buffers(page))) {
 		// (junbong): We should stop this handle(started at ext4djp_write_begin)
 		// TODO: we may handle this case in ext4_da_write_end
-		ext4_journal_stop(handle);
 		return ext4_da_write_end(file, mapping, pos, len, copied, page, fsdata);
 	}
 
@@ -1528,16 +1561,21 @@ static int ext4djp_journalled_write_end(struct file *file,
 
 	if (ext4_has_inline_data(inode)) {
 		printk(KERN_ERR "[%s] not support inline data\n", __func__);
-		return -EIO;
+		BUG();
+		return ext4_write_inline_data_end(inode, pos, len, copied, page);
 	}
 
 	if (unlikely(copied < len) && !PageUptodate(page)) {
 		printk(KERN_ERR "[%s] not implemented yet\n", __func__);
-		return -EIO;
+		BUG();
+		copied = 0;
+		ext4_journalled_zero_new_buffers(handle, inode, page, from, to);
 	} else {
 		if (unlikely(copied < len)) {
 			printk(KERN_ERR "[%s] not implemented yet\n", __func__);
-			return -EIO;
+			BUG();
+			ext4_journalled_zero_new_buffers(handle, inode, page,
+							 from + copied, to);
 		}
 
 		ret = ext4_walk_page_buffers(handle, inode, page_buffers(page),
@@ -1584,42 +1622,6 @@ static int ext4djp_journalled_write_end(struct file *file,
 }
 
 #else
-
-/*
- * This is a private version of page_zero_new_buffers() which doesn't
- * set the buffer to be dirty, since in data=journalled mode we need
- * to call ext4_handle_dirty_metadata() instead.
- */
-static void ext4_journalled_zero_new_buffers(handle_t *handle,
-					    struct inode *inode,
-					    struct page *page,
-					    unsigned from, unsigned to)
-{
-	unsigned int block_start = 0, block_end;
-	struct buffer_head *head, *bh;
-
-	bh = head = page_buffers(page);
-	do {
-		block_end = block_start + bh->b_size;
-		if (buffer_new(bh)) {
-			if (block_end > from && block_start < to) {
-				if (!PageUptodate(page)) {
-					unsigned start, size;
-
-					start = max(from, block_start);
-					size = min(to, block_end) - start;
-
-					zero_user(page, start, size);
-					write_end_fn(handle, inode, bh);
-				}
-				clear_buffer_new(bh);
-			}
-		}
-		block_start = block_end;
-		bh = bh->b_this_page;
-	} while (bh != head);
-}
-
 static int ext4_journalled_write_end(struct file *file,
 				     struct address_space *mapping,
 				     loff_t pos, unsigned len, unsigned copied,
@@ -2967,12 +2969,12 @@ static int ext4djp_do_writepages(struct mpage_da_data *mpd)
 	if (!mapping->nrpages || !mapping_tagged(mapping, PAGECACHE_TAG_DIRTY))
 		goto out_writepages;
 
-	if (ext4_should_journal_data(inode)) {
-		blk_start_plug(&plug);
-		ret = write_cache_pages(mapping, wbc, ext4_writepage_cb, NULL);
-		blk_finish_plug(&plug);
-		goto out_writepages;
-	}
+	// if (ext4_should_journal_data(inode)) {
+	// 	blk_start_plug(&plug);
+	// 	ret = write_cache_pages(mapping, wbc, ext4_writepage_cb, NULL);
+	// 	blk_finish_plug(&plug);
+	// 	goto out_writepages;
+	// }
 
 	/*
 	 * If the filesystem has aborted, it is read-only, so return
