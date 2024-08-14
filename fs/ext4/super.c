@@ -537,7 +537,7 @@ static int ext4_journal_submit_inode_data_buffers(struct jbd2_inode *jinode)
 {
 	int ret;
 
-	if (ext4_should_journal_data(jinode->i_vfs_inode))
+	if (false && ext4_should_journal_data(jinode->i_vfs_inode))
 		ret = ext4_journalled_submit_inode_data_buffers(jinode);
 	else
 		ret = ext4_normal_submit_inode_data_buffers(jinode);
@@ -4921,8 +4921,8 @@ static int ext4_journal_data_mode_check(struct super_block *sb)
 				 "encrypted files will use data=ordered "
 				 "instead of data journaling mode");
 		}
-		if (test_opt(sb, DELALLOC))
-			clear_opt(sb, DELALLOC);
+		// if (test_opt(sb, DELALLOC))
+		// 	clear_opt(sb, DELALLOC);
 	} else {
 		sb->s_iflags |= SB_I_CGROUPWB;
 	}

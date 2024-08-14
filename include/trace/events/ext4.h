@@ -368,6 +368,13 @@ DEFINE_EVENT(ext4__write_begin, ext4_write_begin,
 	TP_ARGS(inode, pos, len)
 );
 
+DEFINE_EVENT(ext4__write_begin, ext4djp_write_begin,
+
+	TP_PROTO(struct inode *inode, loff_t pos, unsigned int len),
+
+	TP_ARGS(inode, pos, len)
+);
+
 DEFINE_EVENT(ext4__write_begin, ext4_da_write_begin,
 
 	TP_PROTO(struct inode *inode, loff_t pos, unsigned int len),
@@ -412,6 +419,14 @@ DEFINE_EVENT(ext4__write_end, ext4_write_end,
 );
 
 DEFINE_EVENT(ext4__write_end, ext4_journalled_write_end,
+
+	TP_PROTO(struct inode *inode, loff_t pos, unsigned int len,
+		 unsigned int copied),
+
+	TP_ARGS(inode, pos, len, copied)
+);
+
+DEFINE_EVENT(ext4__write_end, ext4djp_journalled_write_end,
 
 	TP_PROTO(struct inode *inode, loff_t pos, unsigned int len,
 		 unsigned int copied),
