@@ -117,3 +117,8 @@ config EXT4_KUNIT_TESTS
 	  to the KUnit documentation in Documentation/dev-tools/kunit/.
 
 	  If unsure, say N.
+
+config EXT4_DJPLUS
+    bool "Enable enhanced data journaling mode"
+    depends on EXT4_FS
+    default n

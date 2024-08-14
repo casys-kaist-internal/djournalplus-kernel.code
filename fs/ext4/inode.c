@@ -1324,29 +1324,29 @@ retry_journal:
 	return ret;
 }
 
+/**
+ * @brief EXT4 Data Journaling Plus API
+ * 
+ */
+#ifdef CONFIG_EXT4_DJPLUS
+
 static int ext4djp_write_begin(struct file *file, struct address_space *mapping,
 			    loff_t pos, unsigned len,
 			    struct page **pagep, void **fsdata)
 {
-	// (junbong): Copy from ext4_write_begin
 	struct inode *inode = mapping->host;
-	int ret, needed_blocks;
-	handle_t *handle;
-	int retries = 0;
+	int ret;
 	struct page *page;
 	pgoff_t index;
 	unsigned from, to;
+
+	BUG_ON(!ext4_should_journal_data(inode));
 
 	if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb))))
 		return -EIO;
 
 	trace_ext4djp_write_begin(inode, pos, len);
-	/*
-	 * Reserve one block more for addition to orphan list in case
-	 * we allocate blocks but write fails for some reason
-	 */
-	// TODO(junbong): Adjust if we don't need to journal data
-	needed_blocks = ext4_writepage_trans_blocks(inode) + 1;
+
 	index = pos >> PAGE_SHIFT;
 	from = pos & (PAGE_SIZE - 1);
 	to = from + len;
@@ -1354,12 +1354,7 @@ static int ext4djp_write_begin(struct file *file, struct address_space *mapping,
 	if (ext4_test_inode_state(inode, EXT4_STATE_MAY_INLINE_DATA)) {
 		// (junbong): We do not handle inode inline data case.
 		BUG();
-		ret = ext4_try_to_write_inline_data(mapping, inode, pos, len,
-						    pagep);
-		if (ret < 0)
-			return ret;
-		if (ret == 1)
-			return 0;
+		return -EIO;
 	}
 
 	/*
@@ -1373,97 +1368,39 @@ retry_grab:
 	page = grab_cache_page_write_begin(mapping, index);
 	if (!page)
 		return -ENOMEM;
-	/*
-	 * The same as page allocation, we prealloc buffer heads before
-	 * starting the handle.
-	 */
+
 	if (!page_has_buffers(page))
 		create_empty_buffers(page, inode->i_sb->s_blocksize, 0);
 
-	unlock_page(page);
-
-retry_journal:
-	handle = ext4_journal_start(inode, EXT4_HT_WRITE_PAGE, needed_blocks);
-	if (IS_ERR(handle)) {
-		put_page(page);
-		return PTR_ERR(handle);
-	}
-
-	lock_page(page);
 	if (page->mapping != mapping) {
 		/* The page got truncated from under us */
 		unlock_page(page);
 		put_page(page);
-		ext4_journal_stop(handle);
 		goto retry_grab;
 	}
 	/* In case writeback began while the page was unlocked */
 	wait_for_stable_page(page);
 
-#ifdef CONFIG_FS_ENCRYPTION
-	if (ext4_should_dioread_nolock(inode))
-		ret = ext4_block_write_begin(page, pos, len,
-					     ext4_get_block_unwritten);
-	else
-		ret = ext4_block_write_begin(page, pos, len,
-					     ext4_get_block);
-#else
-	if (ext4_should_dioread_nolock(inode)) {
-		// (junbong): We do not handle dio case.
-		BUG();
-		ret = __block_write_begin(page, pos, len,
-					  ext4_get_block_unwritten);
-	}
-	else
-		ret = __block_write_begin(page, pos, len, ext4_da_get_block_prep);
-#endif
-	if (!ret && ext4_should_journal_data(inode)) {
-		ret = ext4_walk_page_buffers(handle, inode,
+	// TODO: change to delayed allocation enabled selective journaling
+	ret = __block_write_begin(page, pos, len, ext4_da_get_block_prep);
+
+	if (!ret) {
+		ret = ext4_walk_page_buffers(journal_current_handle(), inode,
 					     page_buffers(page), from, to, NULL,
 					     djp_do_journal_get_write_access);
 	}
 
 	if (ret) {
-		bool extended;
-		// (junbong): We do not handle this case.
-		BUG();
-		extended = (pos + len > inode->i_size) &&
-				!ext4_verity_in_progress(inode);
-
+		printk(KERN_ERR "[%s] not implemented yet error code(%d)\n", __func__, ret);
 		unlock_page(page);
-		/*
-		 * __block_write_begin may have instantiated a few blocks
-		 * outside i_size.  Trim these off again. Don't need
-		 * i_size_read because we hold i_rwsem.
-		 *
-		 * Add inode to orphan list in case we crash before
-		 * truncate finishes
-		 */
-		if (extended && ext4_can_truncate(inode))
-			ext4_orphan_add(handle, inode);
-
-		ext4_journal_stop(handle);
-		if (extended) {
-			ext4_truncate_failed_write(inode);
-			/*
-			 * If truncate failed early the inode might
-			 * still be on the orphan list; we need to
-			 * make sure the inode is removed from the
-			 * orphan list in that case.
-			 */
-			if (inode->i_nlink)
-				ext4_orphan_del(NULL, inode);
-		}
-
-		if (ret == -ENOSPC &&
-		    ext4_should_retry_alloc(inode->i_sb, &retries))
-			goto retry_journal;
 		put_page(page);
 		return ret;
 	}
 	*pagep = page;
 	return ret;
 }
+
+#endif /* CONFIG_EXT4_DJPLUS */
 
 /* For write_end() in data=journal mode */
 static int write_end_fn(handle_t *handle, struct inode *inode,
@@ -1473,8 +1410,14 @@ static int write_end_fn(handle_t *handle, struct inode *inode,
 	if (!buffer_mapped(bh) || buffer_freed(bh))
 		return 0;
 	set_buffer_uptodate(bh);
+
+#ifdef CONFIG_EXT4_DJPLUS
 	if (!buffer_delay(bh))
 		ret = ext4_handle_dirty_metadata(handle, NULL, bh);
+#else
+	ret = ext4_handle_dirty_metadata(handle, NULL, bh);
+#endif
+
 	clear_buffer_meta(bh);
 	clear_buffer_prio(bh);
 	return ret;
@@ -1554,6 +1497,94 @@ static int ext4_write_end(struct file *file,
 	return ret ? ret : copied;
 }
 
+#ifdef CONFIG_EXT4_DJPLUS
+
+static int ext4djp_journalled_write_end(struct file *file,
+				     struct address_space *mapping,
+				     loff_t pos, unsigned len, unsigned copied,
+				     struct page *page, void *fsdata)
+{
+	handle_t *handle = ext4_journal_current_handle();
+	struct inode *inode = mapping->host;
+	loff_t old_size = inode->i_size;
+	int ret = 0, ret2;
+	int partial = 0;
+	unsigned from, to;
+	int size_changed = 0;
+	bool verity = ext4_verity_in_progress(inode);
+
+	if (buffer_delay(page_buffers(page))) {
+		// (junbong): We should stop this handle(started at ext4djp_write_begin)
+		// TODO: we may handle this case in ext4_da_write_end
+		ext4_journal_stop(handle);
+		return ext4_da_write_end(file, mapping, pos, len, copied, page, fsdata);
+	}
+
+	trace_ext4djp_journalled_write_end(inode, pos, len, copied);
+	from = pos & (PAGE_SIZE - 1);
+	to = from + len;
+
+	BUG_ON(!ext4_handle_valid(handle));
+
+	if (ext4_has_inline_data(inode)) {
+		printk(KERN_ERR "[%s] not support inline data\n", __func__);
+		return -EIO;
+	}
+
+	if (unlikely(copied < len) && !PageUptodate(page)) {
+		printk(KERN_ERR "[%s] not implemented yet\n", __func__);
+		return -EIO;
+	} else {
+		if (unlikely(copied < len)) {
+			printk(KERN_ERR "[%s] not implemented yet\n", __func__);
+			return -EIO;
+		}
+
+		ret = ext4_walk_page_buffers(handle, inode, page_buffers(page),
+					     from, from + copied, &partial,
+					     write_end_fn);
+		if (!partial)
+			SetPageUptodate(page);
+	}
+	if (!verity)
+		size_changed = ext4_update_inode_size(inode, pos + copied);
+	ext4_set_inode_state(inode, EXT4_STATE_JDATA);
+	EXT4_I(inode)->i_datasync_tid = handle->h_transaction->t_tid;
+	unlock_page(page);
+	put_page(page);
+
+	if (old_size < pos && !verity)
+		pagecache_isize_extended(inode, old_size, pos);
+
+	if (size_changed) {
+		ret2 = ext4_mark_inode_dirty(handle, inode);
+		if (!ret)
+			ret = ret2;
+	}
+
+	if (pos + len > inode->i_size && !verity && ext4_can_truncate(inode))
+		/* if we have allocated more blocks and copied
+		 * less. We will have blocks allocated outside
+		 * inode->i_size. So truncate them
+		 */
+		ext4_orphan_add(handle, inode);
+
+	if (pos + len > inode->i_size && !verity) {
+		ext4_truncate_failed_write(inode);
+		/*
+		 * If truncate failed early the inode might still be
+		 * on the orphan list; we need to make sure the inode
+		 * is removed from the orphan list in that case.
+		 */
+		if (inode->i_nlink)
+			ext4_orphan_del(NULL, inode);
+	}
+
+	return ret ? ret : copied;
+}
+
+#else
+
 /*
  * This is a private version of page_zero_new_buffers() which doesn't
  * set the buffer to be dirty, since in data=journalled mode we need
@@ -1589,12 +1620,11 @@ static void ext4_journalled_zero_new_buffers(handle_t *handle,
 	} while (bh != head);
 }
 
-static int ext4djp_journalled_write_end(struct file *file,
+static int ext4_journalled_write_end(struct file *file,
 				     struct address_space *mapping,
 				     loff_t pos, unsigned len, unsigned copied,
 				     struct page *page, void *fsdata)
 {
-	// (junbong): Rename from ext4_journalled_write_end
 	handle_t *handle = ext4_journal_current_handle();
 	struct inode *inode = mapping->host;
 	loff_t old_size = inode->i_size;
@@ -1604,14 +1634,7 @@ static int ext4djp_journalled_write_end(struct file *file,
 	int size_changed = 0;
 	bool verity = ext4_verity_in_progress(inode);
 
-	if (buffer_delay(page_buffers(page))) {
-		// (junbong): We should stop this handle(started at ext4djp_write_begin)
-		// TODO: we may handle this case in ext4_da_write_end
-		ext4_journal_stop(handle);
-		return ext4_da_write_end(file, mapping, pos, len, copied, page, fsdata);
-	}
-
-	trace_ext4djp_journalled_write_end(inode, pos, len, copied);
+	trace_ext4_journalled_write_end(inode, pos, len, copied);
 	from = pos & (PAGE_SIZE - 1);
 	to = from + len;
 
@@ -1672,6 +1695,8 @@ static int ext4djp_journalled_write_end(struct file *file,
 
 	return ret ? ret : copied;
 }
+
+#endif /* CONFIG_EXT4_DJPLUS */
 
 /*
  * Reserve space for a single cluster
@@ -2091,6 +2116,10 @@ static int __ext4_journalled_writepage(struct page *page,
 	int inline_data = ext4_has_inline_data(inode);
 	struct buffer_head *inode_bh = NULL;
 	loff_t size;
+
+#ifdef CONFIG_EXT4_DJPLUS
+	// SetPageChecked called on ext4_journalled_dirty_folio(), only for mmapped file
+#endif
 
 	ClearPageChecked(page);
 
@@ -2938,12 +2967,12 @@ static int ext4djp_do_writepages(struct mpage_da_data *mpd)
 	if (!mapping->nrpages || !mapping_tagged(mapping, PAGECACHE_TAG_DIRTY))
 		goto out_writepages;
 
-	// if (ext4_should_journal_data(inode)) {
-	// 	blk_start_plug(&plug);
-	// 	ret = write_cache_pages(mapping, wbc, ext4_writepage_cb, NULL);
-	// 	blk_finish_plug(&plug);
-	// 	goto out_writepages;
-	// }
+	if (ext4_should_journal_data(inode)) {
+		blk_start_plug(&plug);
+		ret = write_cache_pages(mapping, wbc, ext4_writepage_cb, NULL);
+		blk_finish_plug(&plug);
+		goto out_writepages;
+	}
 
 	/*
 	 * If the filesystem has aborted, it is read-only, so return
@@ -4189,9 +4218,15 @@ static const struct address_space_operations ext4_aops = {
 static const struct address_space_operations ext4_journalled_aops = {
 	.read_folio		= ext4_read_folio,
 	.readahead		= ext4_readahead,
+#ifdef CONFIG_EXT4_DJPLUS
 	.writepages		= ext4djp_writepages,
 	.write_begin		= ext4djp_write_begin,
 	.write_end		= ext4djp_journalled_write_end,
+#else
+	.writepages		= ext4_writepages,
+	.write_begin		= ext4_write_begin,
+	.write_end		= ext4_journalled_write_end,
+#endif
 	.dirty_folio		= ext4_journalled_dirty_folio,
 	.bmap			= ext4_bmap,
 	.invalidate_folio	= ext4_journalled_invalidate_folio,
@@ -6292,6 +6327,18 @@ int ext4_writepage_trans_blocks(struct inode *inode)
 		ret += bpp;
 	return ret;
 }
+
+#ifdef CONFIG_EXT4_DJPLUS
+int ext4djp_writepage_trans_blocks(struct inode *inode, size_t cnt)
+{
+	int block_size = 1 << inode->i_sb->s_blocksize_bits;
+	int ret = ext4_writepage_trans_blocks(inode);
+
+	ret += (cnt + block_size - 1) / block_size;
+
+	return ret;
+}
+#endif
 
 /*
  * Calculate the journal credits for a chunk of data modification.

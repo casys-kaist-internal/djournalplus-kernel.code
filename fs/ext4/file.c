@@ -270,6 +270,10 @@ static ssize_t ext4_write_checks(struct kiocb *iocb, struct iov_iter *from)
 static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 					struct iov_iter *from)
 {
+#ifdef CONFIG_EXT4_DJPLUS
+	handle_t *handle = NULL;
+	int needed_blocks;
+#endif
 	ssize_t ret;
 	struct inode *inode = file_inode(iocb->ki_filp);
 
@@ -281,10 +285,27 @@ static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 	if (ret <= 0)
 		goto out;
 
+#ifdef CONFIG_EXT4_DJPLUS
+	if (ext4_should_journal_data(inode)) {
+		// Temporal for needed blocks, block is insufficient do journal_extend();
+		needed_blocks = ext4djp_writepage_trans_blocks(inode, from->count);
+
+		handle = ext4_journal_start(inode, EXT4_HT_WRITE_PAGE, needed_blocks);
+		if (IS_ERR(handle)) {
+			ret = PTR_ERR(handle);
+			goto out;
+		}
+	}
+#endif
+
 	current->backing_dev_info = inode_to_bdi(inode);
 	ret = generic_perform_write(iocb, from);
 	current->backing_dev_info = NULL;
 
+#ifdef CONFIG_EXT4_DJPLUS
+	if (ext4_should_journal_data(inode))
+		ext4_journal_stop(handle);
+#endif
 out:
 	inode_unlock(inode);
 	if (likely(ret > 0)) {
