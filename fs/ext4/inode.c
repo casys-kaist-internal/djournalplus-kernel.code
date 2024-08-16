@@ -1416,6 +1416,7 @@ static int write_end_fn(handle_t *handle, struct inode *inode,
 		return 0;
 	set_buffer_uptodate(bh);
 
+	/* (Jaehwan) Redundant code, delay buffer cannot get here */
 #ifdef CONFIG_EXT4_DJPLUS
 	if (!buffer_delay(bh))
 		ret = ext4_handle_dirty_metadata(handle, NULL, bh);
@@ -3075,6 +3076,9 @@ static int ext4djp_do_writepages(struct mpage_da_data *mpd)
 	if (!mapping->nrpages || !mapping_tagged(mapping, PAGECACHE_TAG_DIRTY))
 		goto out_writepages;
 
+	/* (Jaehwan) We have to consider writeback with committed data
+	 *  Need to check comment below codes make any problems */
+
 	// if (ext4_should_journal_data(inode)) {
 	// 	blk_start_plug(&plug);
 	// 	ret = write_cache_pages(mapping, wbc, ext4_writepage_cb, NULL);
@@ -3104,7 +3108,7 @@ static int ext4djp_do_writepages(struct mpage_da_data *mpd)
 	 * we'd better clear the inline data here.
 	 */
 	if (ext4_has_inline_data(inode)) {
-		/* Just inode will be modified... */
+		BUG(); // Not implemented yet
 		handle = ext4_journal_start(inode, EXT4_HT_INODE, 1);
 		if (IS_ERR(handle)) {
 			ret = PTR_ERR(handle);
@@ -3117,6 +3121,7 @@ static int ext4djp_do_writepages(struct mpage_da_data *mpd)
 	}
 
 	if (ext4_should_dioread_nolock(inode)) {
+		BUG(); // Not implemented yet
 		/*
 		 * We may need to convert up to one extent per block in
 		 * the page and we may dirty the inode.
