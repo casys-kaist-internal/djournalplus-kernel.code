@@ -272,8 +272,9 @@ static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 {
 #ifdef CONFIG_EXT4_DJPLUS
 	handle_t *handle = NULL;
-	int needed_blocks;
+	int needed_blocks, op;
 #endif
+
 	ssize_t ret;
 	struct inode *inode = file_inode(iocb->ki_filp);
 
@@ -286,9 +287,15 @@ static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 		goto out;
 
 #ifdef CONFIG_EXT4_DJPLUS
+	djp_debug(inode->ino, "pos: %lld, count: %zd.\n", iocb->ki_pos, ret);
+
 	if (ext4_should_journal_data(inode)) {
 		// Temporal for needed blocks, block is insufficient do journal_extend();
 		needed_blocks = ext4djp_writepage_trans_blocks(inode, from->count);
+
+		op = ext4djp_check_da_blocks(inode, iocb->ki_pos, from->count);
+		// TODO: different handle for operations
+		djp_print("op: %d (append:0, overwrite:1, mixed:2).\n", op);
 
 		handle = ext4_journal_start(inode, EXT4_HT_WRITE_PAGE, needed_blocks);
 		if (IS_ERR(handle)) {
@@ -306,6 +313,7 @@ static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 	if (ext4_should_journal_data(inode))
 		ext4_journal_stop(handle);
 #endif
+
 out:
 	inode_unlock(inode);
 	if (likely(ret > 0)) {

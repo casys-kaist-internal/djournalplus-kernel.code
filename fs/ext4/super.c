@@ -5660,8 +5660,13 @@ static int ext4_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto free_sbi;
 
 	if (sbi->s_journal) {
+#ifdef CONFIG_EXT4_DJPLUS
+		if (test_opt(sb, DATA_FLAGS) == EXT4_MOUNT_JOURNAL_DATA)
+			descr = " journalled data plus (DJPLUS) mode";
+#else
 		if (test_opt(sb, DATA_FLAGS) == EXT4_MOUNT_JOURNAL_DATA)
 			descr = " journalled data mode";
+#endif
 		else if (test_opt(sb, DATA_FLAGS) == EXT4_MOUNT_ORDERED_DATA)
 			descr = " ordered data mode";
 		else

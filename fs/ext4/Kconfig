@@ -122,3 +122,8 @@ config EXT4_DJPLUS
     bool "Enable enhanced data journaling mode"
     depends on EXT4_FS
     default n
+
+config EXT4_DJPLUS_DEBUG
+    bool "EXT4_DJPLUS debugging support"
+    depends on EXT4_DJPLUS
+    default n
