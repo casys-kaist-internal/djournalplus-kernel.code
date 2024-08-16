@@ -19,6 +19,11 @@
  *  Assorted race fixes, rewrite of ext4_get_block() by Al Viro, 2000
  */
 
+/* EXT4_DJPLUS */
+#include "asm/page_types.h"
+#include <linux/jbd2.h>
+#include <linux/types.h>
+
 #include <linux/fs.h>
 #include <linux/mount.h>
 #include <linux/time.h>
@@ -2107,6 +2112,107 @@ int ext4_da_get_block_prep(struct inode *inode, sector_t iblock,
 	}
 	return 0;
 }
+
+#ifdef CONFIG_EXT4_DJPLUS
+
+/**
+ * @brief Check status of extent status tree
+ * 
+ * @return ret=0 if delayed, ret>0 if allocated, ret<0 if error
+ */
+static int ext4djp_check_da_block(struct inode *inode,
+								struct ext4_map_blocks *map)
+{
+	struct extent_status es;
+	sector_t iblock = map->m_lblk;
+	int retval;
+
+	/* Lookup extent status tree firstly */
+	if (ext4_es_lookup_extent(inode, iblock, NULL, &es)) {
+		if (ext4_es_is_hole(&es)) {
+			retval = 0;
+			goto ret;
+		}
+
+		/* Delayed case */
+		if (ext4_es_is_delayed(&es) && !ext4_es_is_unwritten(&es))
+			return 0;
+
+		/* From iblock how many blocks are pre-allocated?
+		 * Do we need to check for unwritten case as allocated? */
+		return es.es_len - (iblock - es.es_lblk);
+	}
+
+	if (ext4_has_inline_data(inode)) {
+		printk(KERN_ERR "[%s] djp not support inline data\n", __func__);
+		return -EIO;
+	}
+
+	/*
+	 * Try to see if we can get the block without requesting a new
+	 * file system block.
+	 */
+	down_read(&EXT4_I(inode)->i_data_sem);
+
+	if (ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS))
+		retval = ext4_ext_map_blocks(NULL, inode, map, 0);
+	else {
+		printk(KERN_ERR "[%s] djp not support indirect data\n", __func__);
+		retval = -EIO;
+	}
+	up_read((&EXT4_I(inode)->i_data_sem));
+ret:
+	return retval;
+}
+
+/**
+ * @brief Check write contains append or overwrite or mixed
+ *
+ */
+int ext4djp_check_da_blocks(struct inode *inode, loff_t pos, ssize_t len)
+{
+	struct ext4_map_blocks map;
+	sector_t iblock, end;
+	unsigned blocksize;
+	int i, ret, retval = 0;
+	bool all_delayed = true;
+	bool all_overwrite = true;
+
+	blocksize = PAGE_SHIFT - inode->i_blkbits;
+	iblock = (sector_t)pos >> PAGE_SHIFT << blocksize;
+	end = (sector_t)(pos + len - 1) >> PAGE_SHIFT << blocksize;
+
+	map.m_len = 1;
+
+	for (i = 0; i < end - iblock + 1; i++) {
+		map.m_lblk = iblock + i;
+		ret = ext4djp_check_da_block(inode, &map);
+		if (ret < 0) {
+			retval = ret;
+			goto ret;
+		}
+
+		if (!ret)
+			all_overwrite = false;
+		else {
+			all_delayed = false;
+			i += (ret - 1); // skip contiguously alloced blocks
+		}
+	}
+
+	if (all_delayed)
+		retval = EXT4DJP_APPEND;
+	else if (all_overwrite)
+		retval = EXT4DJP_OVERWRITE;
+	else
+		retval = EXT4DJP_MIXWRITE;
+
+ret:
+	return retval;
+}
+
+#endif /* CONFIG_EXT4_DJPLUS */
+
 
 static int __ext4_journalled_writepage(struct page *page,
 				       unsigned int len)

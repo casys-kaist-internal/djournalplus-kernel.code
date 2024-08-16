@@ -3852,7 +3852,14 @@ static inline int ext4_buffer_uptodate(struct buffer_head *bh)
 }
 
 #ifdef CONFIG_EXT4_DJPLUS
+enum {
+	EXT4DJP_APPEND = 0, // write op is all delayed allocated
+	EXT4DJP_OVERWRITE, // all overwrite
+	EXT4DJP_MIXWRITE
+};
+
 extern int ext4djp_writepage_trans_blocks(struct inode *inode, size_t cnt);
+extern int ext4djp_check_da_blocks(struct inode *inode, loff_t pos, ssize_t len);
 #endif
 
 #endif	/* __KERNEL__ */
