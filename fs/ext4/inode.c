@@ -226,9 +226,14 @@ void ext4_evict_inode(struct inode *inode)
 	if (is_bad_inode(inode))
 		goto no_delete;
 	dquot_initialize(inode);
-
+	/* DJPlus do selective journaling */
+#ifdef CONFIG_EXT4_DJPLUS
+	if (ext4_should_order_data(inode) || ext4_should_journal_data(inode))
+		ext4_begin_ordered_truncate(inode, 0);
+#else
 	if (ext4_should_order_data(inode))
 		ext4_begin_ordered_truncate(inode, 0);
+#endif
 	truncate_inode_pages_final(&inode->i_data);
 
 	/*
@@ -3050,6 +3055,7 @@ static int ext4_writepage_cb(struct page *page, struct writeback_control *wbc,
 	return ext4_writepage(page, wbc);
 }
 
+#ifdef CONFIG_EXT4_DJPLUS
 static int ext4djp_do_writepages(struct mpage_da_data *mpd)
 {
 	// (junbong): Copy from ext4_do_writepages
@@ -3284,6 +3290,7 @@ out_writepages:
 				     nr_to_write - wbc->nr_to_write);
 	return ret;
 }
+#endif
 
 static int ext4_do_writepages(struct mpage_da_data *mpd)
 {
@@ -3514,6 +3521,7 @@ out_writepages:
 	return ret;
 }
 
+#ifdef CONFIG_EXT4_DJPLUS
 static int ext4djp_writepages(struct address_space *mapping,
 			   struct writeback_control *wbc)
 {
@@ -3535,6 +3543,7 @@ static int ext4djp_writepages(struct address_space *mapping,
 
 	return ret;
 }
+#endif
 
 static int ext4_writepages(struct address_space *mapping,
 			   struct writeback_control *wbc)
@@ -6129,12 +6138,22 @@ int ext4_setattr(struct user_namespace *mnt_userns, struct dentry *dentry,
 			inc_ivers = false;
 
 		if (shrink) {
+			/* (Jaehwan) Selective journaling also handling this */
+#ifdef CONFIG_EXT4_DJPLUS
+			if (ext4_should_order_data(inode) || ext4_should_journal_data(inode)) {
+				error = ext4_begin_ordered_truncate(inode,
+							    attr->ia_size);
+				if (error)
+					goto err_out;
+			}
+#else
 			if (ext4_should_order_data(inode)) {
 				error = ext4_begin_ordered_truncate(inode,
 							    attr->ia_size);
 				if (error)
 					goto err_out;
 			}
+#endif
 			/*
 			 * Blocks are going to be removed from the inode. Wait
 			 * for dio in flight.

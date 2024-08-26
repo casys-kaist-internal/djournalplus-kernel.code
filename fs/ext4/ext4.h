@@ -3863,12 +3863,16 @@ extern int ext4djp_writepage_trans_blocks(struct inode *inode, size_t cnt);
 extern int ext4djp_check_da_blocks(struct inode *inode, loff_t pos, ssize_t len);
 
 /* Print for debugging */
+#ifdef CONFIG_EXT4_DJPLUS_PRINT
 #define djp_print(f, a...)						\
 	do {								\
 		printk(KERN_DEBUG "EXT4-DJPLUS (%s, %d): %s:",	\
 			__FILE__, __LINE__, __func__);			\
 		printk(KERN_DEBUG f, ## a);				\
 	} while (0)
+#else
+#define djp_print(fmt, ...)		no_printk(fmt, ##__VA_ARGS__)
+#endif
 
 #ifdef CONFIG_EXT4_DJPLUS_DEBUG
 #define djp_debug(ino, fmt, ...)					\

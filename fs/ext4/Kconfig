@@ -123,6 +123,11 @@ config EXT4_DJPLUS
     depends on EXT4_FS
     default n
 
+config EXT4_DJPLUS_PRINT
+    bool "EXT4_DJPLUS logging(print) support"
+    depends on EXT4_DJPLUS
+    default n
+
 config EXT4_DJPLUS_DEBUG
     bool "EXT4_DJPLUS debugging support"
     depends on EXT4_DJPLUS
