@@ -2754,7 +2754,7 @@ int jbd2_journal_inode_ranged_wait(handle_t *handle, struct jbd2_inode *jinode,
 			start_byte, start_byte + length - 1);
 }
 
-int jdb2djp_journal_inode_precommit(handle_t *handle, struct jbd2_inode *jinode)
+int jdb2djp_journal_inode_pre_commit(handle_t *handle, struct jbd2_inode *jinode)
 {
 	transaction_t *transaction = handle->h_transaction;
 	journal_t *journal = transaction->t_journal;

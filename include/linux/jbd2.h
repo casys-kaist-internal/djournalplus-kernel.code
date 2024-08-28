@@ -1593,7 +1593,7 @@ extern int	   jbd2_journal_inode_ranged_write(handle_t *handle,
 extern int	   jbd2_journal_inode_ranged_wait(handle_t *handle,
 			struct jbd2_inode *inode, loff_t start_byte,
 			loff_t length);
-extern int	   jdb2djp_journal_inode_precommit(
+extern int	   jdb2djp_journal_inode_pre_commit(
 			handle_t *handle, struct jbd2_inode *jinode);
 extern int	   jbd2_journal_submit_inode_data_buffers(
 			struct jbd2_inode *jinode);
