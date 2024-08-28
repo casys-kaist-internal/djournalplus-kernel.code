@@ -452,6 +452,11 @@ struct jbd2_inode {
 	 * ends. [j_list_lock]
 	 */
 	loff_t i_dirty_end;
+
+#ifdef CONFIG_EXT4_DJPLUS
+	struct list_head	i_djp_list;
+	handle_t		*i_handle;
+#endif
 };
 
 struct jbd2_revoke_table_s;
@@ -726,6 +731,15 @@ struct transaction_s
 	 * structures associated with the transaction
 	 */
 	struct list_head	t_private_list;
+
+	/*
+	 * List of inode that has dealloc blocks which should be allocated
+	 * in this transaction [j_list_lock]
+	 */
+	struct list_head	t_dealloc_list;
+
+	/* Number of t_updates to wait on commit */
+	atomic_t		t_dealloc_updates;
 };
 
 struct transaction_run_stats_s {
@@ -1197,6 +1211,15 @@ struct journal_s
 	u32			j_max_batch_time;
 
 	/**
+	 * @j_pre_commit_callback:
+	 *
+	 * This function is called before a transaction is closed.
+	 */
+	void			(*j_pre_commit_callback)(journal_t *,
+						     transaction_t *);
+
+
+	/**
 	 * @j_commit_callback:
 	 *
 	 * This function is called when a transaction is closed.
@@ -1570,6 +1593,8 @@ extern int	   jbd2_journal_inode_ranged_write(handle_t *handle,
 extern int	   jbd2_journal_inode_ranged_wait(handle_t *handle,
 			struct jbd2_inode *inode, loff_t start_byte,
 			loff_t length);
+extern int	   jdb2djp_journal_inode_precommit(
+			handle_t *handle, struct jbd2_inode *jinode);
 extern int	   jbd2_journal_submit_inode_data_buffers(
 			struct jbd2_inode *jinode);
 extern int	   jbd2_journal_finish_inode_data_buffers(

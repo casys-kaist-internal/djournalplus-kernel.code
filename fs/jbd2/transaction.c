@@ -115,6 +115,8 @@ static void jbd2_get_transaction(journal_t *journal,
 	atomic_set(&transaction->t_handle_count, 0);
 	INIT_LIST_HEAD(&transaction->t_inode_list);
 	INIT_LIST_HEAD(&transaction->t_private_list);
+	INIT_LIST_HEAD(&transaction->t_dealloc_list);
+	atomic_set(&transaction->t_dealloc_updates, 0);
 
 	/* Set up the commit timer for the new transaction. */
 	journal->j_commit_timer.expires = round_jiffies_up(transaction->t_expires);
@@ -747,7 +749,12 @@ static void stop_this_handle(handle_t *handle)
 	if (handle->h_rsv_handle)
 		__jbd2_journal_unreserve_handle(handle->h_rsv_handle,
 						transaction);
+#ifdef CONFIG_EXT4_DJPLUS
+	if (atomic_sub_return(1, &transaction->t_updates) <=
+			atomic_read(&transaction->t_dealloc_updates))
+#else
 	if (atomic_dec_and_test(&transaction->t_updates))
+#endif
 		wake_up(&journal->j_wait_updates);
 
 	rwsem_release(&journal->j_trans_commit_map, _THIS_IP_);
@@ -854,7 +861,14 @@ void jbd2_journal_wait_updates(journal_t *journal)
 
 		prepare_to_wait(&journal->j_wait_updates, &wait,
 				TASK_UNINTERRUPTIBLE);
+#ifdef CONFIG_EXT4_DJPLUS
+		if (atomic_read(&transaction->t_updates) <=
+				atomic_read(&transaction->t_dealloc_updates)) {
+			BUG_ON(atomic_read(&transaction->t_updates) !=
+					atomic_read(&transaction->t_dealloc_updates));
+#else
 		if (!atomic_read(&transaction->t_updates)) {
+#endif
 			finish_wait(&journal->j_wait_updates, &wait);
 			break;
 		}
@@ -2738,6 +2752,53 @@ int jbd2_journal_inode_ranged_wait(handle_t *handle, struct jbd2_inode *jinode,
 {
 	return jbd2_journal_file_inode(handle, jinode, JI_WAIT_DATA,
 			start_byte, start_byte + length - 1);
+}
+
+int jdb2djp_journal_inode_precommit(handle_t *handle, struct jbd2_inode *jinode)
+{
+	transaction_t *transaction = handle->h_transaction;
+	journal_t *journal = transaction->t_journal;
+	handle_t *ihandle;
+	struct jbd2_inode *jjinode;
+
+	/* TODO(junbongwe): We may need to hold fine grained lock to handle this list. */
+	write_lock(&journal->j_state_lock);
+	list_for_each_entry(jjinode, &transaction->t_dealloc_list, i_djp_list) {
+		if (jjinode == jinode) {
+			/* The inode is already in dealloc list.
+			 * Just transfer credit of handle to ihandle and stop the handle.
+			 */
+			ihandle = jjinode->i_handle;
+
+			BUG_ON(!ihandle);
+			BUG_ON(handle->h_ref != 1);
+			/* We don't expect there exists a rsv_handle */
+			BUG_ON(handle->h_rsv_handle);
+
+			ihandle->h_total_credits += handle->h_total_credits;
+			ihandle->h_revoke_credits_requested += handle->h_revoke_credits_requested;
+			ihandle->h_revoke_credits += handle->h_revoke_credits;
+
+			handle->h_total_credits = 0;
+			handle->h_revoke_credits_requested = 0;
+			handle->h_revoke_credits = 0;
+
+			write_unlock(&journal->j_state_lock);
+
+			return jbd2_journal_stop(handle);
+		}
+	}
+	BUG_ON(jinode->i_handle);
+	BUG_ON(current->journal_info != handle);
+	current->journal_info = NULL;
+	jinode->i_handle = handle;
+	list_add(&jinode->i_djp_list, &transaction->t_dealloc_list);
+	if (atomic_read(&transaction->t_updates) <=
+			atomic_add_return(1, &transaction->t_dealloc_updates))
+		wake_up(&journal->j_wait_updates);
+	write_unlock(&journal->j_state_lock);
+
+	return 0;
 }
 
 /*

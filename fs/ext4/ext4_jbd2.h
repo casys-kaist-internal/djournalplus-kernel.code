@@ -330,6 +330,15 @@ static inline handle_t *__ext4_journal_start(struct inode *inode,
 #define ext4_journal_stop(handle) \
 	__ext4_journal_stop(__func__, __LINE__, (handle))
 
+#ifdef CONFIG_EXT4_DJPLUS
+static inline void ext4djp_alloc_on_commit_or_stop(handle_t *handle,
+						   struct inode *inode)
+{
+	BUG_ON(!ext4_handle_valid(handle));
+	jdb2djp_journal_inode_precommit(handle, EXT4_I(inode)->jinode);
+}
+
+#endif
 #define ext4_journal_start_reserved(handle, type) \
 	__ext4_journal_start_reserved((handle), __LINE__, (type))
 

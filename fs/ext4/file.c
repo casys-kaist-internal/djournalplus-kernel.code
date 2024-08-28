@@ -304,7 +304,7 @@ static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 
 #ifdef CONFIG_EXT4_DJPLUS
 	if (ext4_should_journal_data(inode))
-		ext4_journal_stop(handle);
+		ext4djp_alloc_on_commit_or_stop(handle, inode);
 #endif
 out:
 	inode_unlock(inode);

@@ -488,6 +488,10 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 
 	commit_transaction->t_state = T_SWITCH;
 
+	if (journal->j_pre_commit_callback)
+		journal->j_pre_commit_callback(journal, commit_transaction);
+
+	J_ASSERT(!atomic_read(&commit_transaction->t_updates));
 	J_ASSERT (atomic_read(&commit_transaction->t_outstanding_credits) <=
 			journal->j_max_transaction_buffers);
 
