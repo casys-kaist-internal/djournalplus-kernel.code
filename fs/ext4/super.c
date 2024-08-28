@@ -529,7 +529,8 @@ static void ext4djp_alloc_on_commit_callback(journal_t *journal, transaction_t *
 		current->journal_info = jinode->i_handle;
 		jinode->i_handle = NULL;
 		write_unlock(&journal->j_state_lock);
-		ext4_alloc_da_blocks(jinode->i_vfs_inode);
+		if (EXT4_I(jinode->i_vfs_inode)->i_reserved_data_blocks)
+			filemap_fdatawrite(jinode->i_vfs_inode->i_mapping);
 		ext4_journal_stop(current->journal_info);
 		write_lock(&journal->j_state_lock);
 		list_del(&jinode->i_djp_list);
