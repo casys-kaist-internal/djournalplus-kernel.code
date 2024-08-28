@@ -273,6 +273,7 @@ static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 #ifdef CONFIG_EXT4_DJPLUS
 	handle_t *handle = NULL;
 	int needed_blocks;
+	unsigned int reserved_data_blocks;
 #endif
 	ssize_t ret;
 	struct inode *inode = file_inode(iocb->ki_filp);
@@ -289,6 +290,7 @@ static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 	if (ext4_should_journal_data(inode)) {
 		// Temporal for needed blocks, block is insufficient do journal_extend();
 		needed_blocks = ext4djp_writepage_trans_blocks(inode, from->count);
+		reserved_data_blocks = EXT4_I(inode)->i_reserved_data_blocks;
 
 		handle = ext4_journal_start(inode, EXT4_HT_WRITE_PAGE, needed_blocks);
 		if (IS_ERR(handle)) {
@@ -303,8 +305,16 @@ static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 	current->backing_dev_info = NULL;
 
 #ifdef CONFIG_EXT4_DJPLUS
-	if (ext4_should_journal_data(inode))
-		ext4djp_alloc_on_commit_or_stop(handle, inode);
+	if (ext4_should_journal_data(inode)) {
+		if (EXT4_I(inode)->i_reserved_data_blocks > reserved_data_blocks)
+			/* We did dealloc some block. */
+			ext4djp_alloc_on_commit_or_stop(handle, inode);
+		else {
+			/* We did not dealloc any block. */
+			BUG_ON(EXT4_I(inode)->i_reserved_data_blocks != reserved_data_blocks);
+			ext4_journal_stop(handle);
+		}
+	}
 #endif
 out:
 	inode_unlock(inode);
