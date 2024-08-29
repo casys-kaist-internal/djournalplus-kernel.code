@@ -1553,11 +1553,8 @@ static int ext4djp_journalled_write_end(struct file *file,
 	int size_changed = 0;
 	bool verity = ext4_verity_in_progress(inode);
 
-	if (buffer_delay(page_buffers(page))) {
-		// (junbong): We should stop this handle(started at ext4djp_write_begin)
-		// TODO: we may handle this case in ext4_da_write_end
+	if (buffer_delay(page_buffers(page)))
 		return ext4_da_write_end(file, mapping, pos, len, copied, page, fsdata);
-	}
 
 	trace_ext4djp_journalled_write_end(inode, pos, len, copied);
 	from = pos & (PAGE_SIZE - 1);
