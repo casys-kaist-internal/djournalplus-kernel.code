@@ -3852,8 +3852,35 @@ static inline int ext4_buffer_uptodate(struct buffer_head *bh)
 }
 
 #ifdef CONFIG_EXT4_DJPLUS
+
+enum {
+	EXT4DJP_APPEND = 0, // write op is all delayed allocated
+	EXT4DJP_OVERWRITE, // all overwrite
+	EXT4DJP_MIXWRITE
+};
+
 extern int ext4djp_writepage_trans_blocks(struct inode *inode, size_t cnt);
+extern int ext4djp_check_da_blocks(struct inode *inode, loff_t pos, ssize_t len);
+
+/* Print for debugging */
+#define djp_print(f, a...)						\
+	do {								\
+		printk(KERN_DEBUG "EXT4-DJPLUS (%s, %d): %s:",	\
+			__FILE__, __LINE__, __func__);			\
+		printk(KERN_DEBUG f, ## a);				\
+	} while (0)
+
+#ifdef CONFIG_EXT4_DJPLUS_DEBUG
+#define djp_debug(ino, fmt, ...)					\
+	pr_debug("[%s/%d] EXT4-DJPLUS (%s): ino %lu: (%s, %d): %s:" fmt,	\
+		 current->comm, task_pid_nr(current),			\
+		 ino->i_sb->s_id, ino->i_ino, __FILE__, __LINE__,	\
+		 __func__, ##__VA_ARGS__)
+#else
+#define djp_debug(ino, fmt, ...)	no_printk(fmt, ##__VA_ARGS__)
 #endif
+
+#endif /* EXT4_DJPLUS */
 
 #endif	/* __KERNEL__ */
 
