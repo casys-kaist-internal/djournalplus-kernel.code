@@ -295,7 +295,7 @@ static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 
 		op = ext4djp_check_da_blocks(inode, iocb->ki_pos, from->count);
 		// TODO: different handle for operations
-		djp_print("op: %d (append:0, overwrite:1, mixed:2).\n", op);
+		// djp_print("op: %d (append:0, overwrite:1, mixed:2).\n", op);
 
 		handle = ext4_journal_start(inode, EXT4_HT_WRITE_PAGE, needed_blocks);
 		if (IS_ERR(handle)) {

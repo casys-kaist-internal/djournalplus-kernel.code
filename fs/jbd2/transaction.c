@@ -2759,18 +2759,11 @@ int jdb2djp_journal_inode_pre_commit(handle_t *handle, struct jbd2_inode *jinode
 	transaction_t *transaction = handle->h_transaction;
 	journal_t *journal = transaction->t_journal;
 	handle_t *ihandle;
-	struct jbd2_inode *jjinode;
 
-	/* TODO(junbongwe): We may need to hold fine grained lock to handle this list. */
-	write_lock(&journal->j_state_lock);
-	list_for_each_entry(jjinode, &transaction->t_dealloc_list, i_djp_list) {
-		if (jjinode == jinode) {
-			/* The inode is already in dealloc list.
-			 * Just transfer credit of handle to ihandle and stop the handle.
-			 */
-			ihandle = jjinode->i_handle;
+	/* Caller should hold inode lock */
+	if (jinode->i_handle) {
+			ihandle = jinode->i_handle;
 
-			BUG_ON(!ihandle);
 			BUG_ON(handle->h_ref != 1);
 			/* We don't expect there exists a rsv_handle */
 			BUG_ON(handle->h_rsv_handle);
@@ -2783,11 +2776,10 @@ int jdb2djp_journal_inode_pre_commit(handle_t *handle, struct jbd2_inode *jinode
 			handle->h_revoke_credits_requested = 0;
 			handle->h_revoke_credits = 0;
 
-			write_unlock(&journal->j_state_lock);
-
 			return jbd2_journal_stop(handle);
-		}
 	}
+	/* TODO(junbongwe): We may need to hold fine grained lock to handle this list. */
+	write_lock(&journal->j_state_lock);
 	BUG_ON(jinode->i_handle);
 	BUG_ON(current->journal_info != handle);
 	current->journal_info = NULL;
