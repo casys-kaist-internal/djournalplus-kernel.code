@@ -272,7 +272,8 @@ static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 {
 #ifdef CONFIG_EXT4_DJPLUS
 	handle_t *handle = NULL;
-	int needed_blocks, op;
+	int needed_blocks, nr_blks, nr_append;
+	unsigned int block_size;
 #endif
 
 	ssize_t ret;
@@ -287,15 +288,22 @@ static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 		goto out;
 
 #ifdef CONFIG_EXT4_DJPLUS
-	djp_debug(inode, "pos: %lld, count: %zd.\n", iocb->ki_pos, ret);
-
 	if (ext4_should_journal_data(inode)) {
-		// Temporal for needed blocks, block is insufficient do journal_extend();
-		needed_blocks = ext4djp_writepage_trans_blocks(inode, from->count);
+		/* Total data blocks */
+		block_size =  1 << inode->i_sb->s_blocksize_bits;
+		nr_blks = (from->count + block_size - 1) / block_size;
 
-		op = ext4djp_check_da_blocks(inode, iocb->ki_pos, from->count);
-		// TODO: different handle for operations
-		// djp_print("op: %d (append:0, overwrite:1, mixed:2).\n", op);
+		/* How many blocks to be appended (for dealloc) */
+		nr_append = ext4djp_count_nr_append(inode, iocb->ki_pos, from->count);
+		if (nr_append < 0) {
+			pr_err("ext4djp_count_nr_append failed (%d).\n", nr_append);
+			ret = nr_append;
+			goto out;
+		}
+		BUG_ON(nr_append > nr_blks);
+
+		needed_blocks = ext4djp_writepage_trans_blocks(inode, from->count);
+		needed_blocks += (nr_blks - nr_append);
 
 		handle = ext4_journal_start(inode, EXT4_HT_WRITE_PAGE, needed_blocks);
 		if (IS_ERR(handle)) {
@@ -311,8 +319,13 @@ static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 
 #ifdef CONFIG_EXT4_DJPLUS
 	if (ext4_should_journal_data(inode)) {
-		/* TODO(junbongwe): We could just stop handle if we did not dealloc */
-		ext4djp_alloc_on_commit_or_stop(handle, inode);
+		if (nr_append)
+			/* We did dealloc some block. */
+			ext4djp_alloc_on_commit_or_stop(handle, inode);
+		else {
+			/* We did not dealloc any block. */
+			ext4_journal_stop(handle);
+		}
 	}
 #endif
 

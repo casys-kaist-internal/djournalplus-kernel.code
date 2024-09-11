@@ -21,6 +21,7 @@
 
 /* EXT4_DJPLUS */
 #include "asm/page_types.h"
+#include "ext4.h"
 #include <linux/jbd2.h>
 #include <linux/types.h>
 
@@ -2164,17 +2165,16 @@ ret:
 }
 
 /**
- * @brief Check write contains append or overwrite or mixed
+ * @brief Count number of append blocks
  *
+ * @return int (nr append blocks, <0: error)
  */
-int ext4djp_check_da_blocks(struct inode *inode, loff_t pos, ssize_t len)
+int ext4djp_count_nr_append(struct inode *inode, loff_t pos, ssize_t len)
 {
 	struct ext4_map_blocks map;
 	sector_t iblock, end;
-	unsigned blocksize;
+	unsigned blocksize, count = 0;
 	int i, ret, retval = 0;
-	bool all_delayed = true;
-	bool all_overwrite = true;
 
 	blocksize = PAGE_SHIFT - inode->i_blkbits;
 	iblock = (sector_t)pos >> PAGE_SHIFT << blocksize;
@@ -2191,19 +2191,13 @@ int ext4djp_check_da_blocks(struct inode *inode, loff_t pos, ssize_t len)
 		}
 
 		if (!ret)
-			all_overwrite = false;
-		else {
-			all_delayed = false;
+			count++;
+		else
 			i += (ret - 1); // skip contiguously alloced blocks
-		}
 	}
 
-	if (all_delayed)
-		retval = EXT4DJP_APPEND;
-	else if (all_overwrite)
-		retval = EXT4DJP_OVERWRITE;
-	else
-		retval = EXT4DJP_MIXWRITE;
+
+	retval = count;
 
 ret:
 	return retval;
@@ -6441,12 +6435,9 @@ int ext4_writepage_trans_blocks(struct inode *inode)
 #ifdef CONFIG_EXT4_DJPLUS
 int ext4djp_writepage_trans_blocks(struct inode *inode, size_t cnt)
 {
-	int block_size = 1 << inode->i_sb->s_blocksize_bits;
-	int ret = ext4_writepage_trans_blocks(inode);
+	int	bpp = ext4_journal_blocks_per_page(inode);
 
-	ret += (cnt + block_size - 1) / block_size;
-
-	return ret;
+	return ext4_meta_trans_blocks(inode, bpp, bpp);
 }
 #endif
 

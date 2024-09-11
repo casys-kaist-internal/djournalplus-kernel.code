@@ -2754,7 +2754,7 @@ int jbd2_journal_inode_ranged_wait(handle_t *handle, struct jbd2_inode *jinode,
 			start_byte, start_byte + length - 1);
 }
 
-int jdb2djp_journal_inode_pre_commit(handle_t *handle, struct jbd2_inode *jinode)
+int jbd2djp_journal_inode_pre_commit(handle_t *handle, struct jbd2_inode *jinode)
 {
 	transaction_t *transaction = handle->h_transaction;
 	journal_t *journal = transaction->t_journal;
@@ -2762,21 +2762,25 @@ int jdb2djp_journal_inode_pre_commit(handle_t *handle, struct jbd2_inode *jinode
 
 	/* Caller should hold inode lock */
 	if (jinode->i_handle) {
-			ihandle = jinode->i_handle;
+		ihandle = jinode->i_handle;
 
-			BUG_ON(handle->h_ref != 1);
-			/* We don't expect there exists a rsv_handle */
-			BUG_ON(handle->h_rsv_handle);
+		BUG_ON(handle->h_ref != 1);
+		/* We don't expect there exists a rsv_handle */
+		BUG_ON(handle->h_rsv_handle);
 
-			ihandle->h_total_credits += handle->h_total_credits;
-			ihandle->h_revoke_credits_requested += handle->h_revoke_credits_requested;
-			ihandle->h_revoke_credits += handle->h_revoke_credits;
+		// TODO: fine-grained calculation for credits
+		// ihandle->h_total_credits += handle->h_total_credits 
+		// 							- EXT4_META_TRANS_BLOCKS(jinode->i_vfs_inode->i_sb) - 1;
+		ihandle->h_total_credits += 1;
+		ihandle->h_revoke_credits_requested += handle->h_revoke_credits_requested;
+		ihandle->h_revoke_credits += handle->h_revoke_credits;
 
-			handle->h_total_credits = 0;
-			handle->h_revoke_credits_requested = 0;
-			handle->h_revoke_credits = 0;
+		// handle->h_total_credits = EXT4_META_TRANS_BLOCKS(jinode->i_vfs_inode->i_sb) + 1;
+		handle->h_total_credits -= 1;
+		handle->h_revoke_credits_requested = 0;
+		handle->h_revoke_credits = 0;
 
-			return jbd2_journal_stop(handle);
+		return jbd2_journal_stop(handle);
 	}
 	/* TODO(junbongwe): We may need to hold fine grained lock to handle this list. */
 	write_lock(&journal->j_state_lock);
@@ -2784,6 +2788,7 @@ int jdb2djp_journal_inode_pre_commit(handle_t *handle, struct jbd2_inode *jinode
 	BUG_ON(current->journal_info != handle);
 	current->journal_info = NULL;
 	jinode->i_handle = handle;
+
 	list_add(&jinode->i_djp_list, &transaction->t_dealloc_list);
 	if (atomic_read(&transaction->t_updates) <=
 			atomic_add_return(1, &transaction->t_dealloc_updates))

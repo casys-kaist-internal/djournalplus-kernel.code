@@ -335,7 +335,7 @@ static inline void ext4djp_alloc_on_commit_or_stop(handle_t *handle,
 						   struct inode *inode)
 {
 	BUG_ON(!ext4_handle_valid(handle));
-	jdb2djp_journal_inode_pre_commit(handle, EXT4_I(inode)->jinode);
+	jbd2djp_journal_inode_pre_commit(handle, EXT4_I(inode)->jinode);
 }
 
 #endif

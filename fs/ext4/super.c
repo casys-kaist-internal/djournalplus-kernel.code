@@ -5480,8 +5480,10 @@ static int __ext4_fill_super(struct fs_context *fc, struct super_block *sb)
 		sbi->s_journal->j_commit_callback =
 			ext4_journal_commit_callback;
 
+#ifdef CONFIG_EXT4_DJPLUS
 	if (test_opt(sb, JOURNAL_DATA))
 		sbi->s_journal->j_pre_commit_callback = ext4djp_alloc_on_commit_callback;
+#endif
 
 	block = ext4_count_free_clusters(sb);
 	ext4_free_blocks_count_set(sbi->s_es,
