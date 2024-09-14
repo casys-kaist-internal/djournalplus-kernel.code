@@ -466,8 +466,14 @@ int ext4_force_commit(struct super_block *sb);
 #define EXT4_INODE_JOURNAL_DATA_MODE	0x01 /* journal data mode */
 #define EXT4_INODE_ORDERED_DATA_MODE	0x02 /* ordered data mode */
 #define EXT4_INODE_WRITEBACK_DATA_MODE	0x04 /* writeback data mode */
+#define EXT4_INODE_JOURNAL_PLUS_MODE	0x08 /* data journal plus mode */
 
 int ext4_inode_journal_mode(struct inode *inode);
+
+static inline int ext4_should_journal_plus(struct inode *inode)
+{
+	return ext4_inode_journal_mode(inode) & EXT4_INODE_JOURNAL_PLUS_MODE;
+}
 
 static inline int ext4_should_journal_data(struct inode *inode)
 {
@@ -515,6 +521,8 @@ static inline int ext4_should_dioread_nolock(struct inode *inode)
 	if (!(ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS)))
 		return 0;
 	if (ext4_should_journal_data(inode))
+		return 0;
+	if (ext4_should_journal_plus(inode))
 		return 0;
 	/* temporary fix to prevent generic/422 test failures */
 	if (!test_opt(inode->i_sb, DELALLOC))

@@ -1267,7 +1267,7 @@ struct ext4_inode_info {
 #define EXT4_MOUNT2_MB_OPTIMIZE_SCAN	0x00000080 /* Optimize group
 						    * scanning in mballoc
 						    */
-
+#define EXT4_MOUNT2_JOURNAL_PLUS 0x00000100 /* Data journal plus mode */
 #define clear_opt(sb, opt)		EXT4_SB(sb)->s_mount_opt &= \
 						~EXT4_MOUNT_##opt
 #define set_opt(sb, opt)		EXT4_SB(sb)->s_mount_opt |= \
@@ -3851,10 +3851,8 @@ static inline int ext4_buffer_uptodate(struct buffer_head *bh)
 	return buffer_uptodate(bh);
 }
 
-#ifdef CONFIG_EXT4_DJPLUS
-
-extern int ext4djp_writepage_trans_blocks(struct inode *inode, size_t cnt);
-extern int ext4djp_count_nr_append(struct inode *inode, loff_t pos, ssize_t len);
+extern int ext4jp_writepage_trans_blocks(struct inode *inode, size_t cnt);
+extern int ext4jp_count_nr_append(struct inode *inode, loff_t pos, ssize_t len);
 
 /* Print for debugging */
 #define djp_print(f, a...)						\
@@ -3873,8 +3871,6 @@ extern int ext4djp_count_nr_append(struct inode *inode, loff_t pos, ssize_t len)
 #else
 #define djp_debug(ino, fmt, ...)	no_printk(fmt, ##__VA_ARGS__)
 #endif
-
-#endif /* EXT4_DJPLUS */
 
 #endif	/* __KERNEL__ */
 

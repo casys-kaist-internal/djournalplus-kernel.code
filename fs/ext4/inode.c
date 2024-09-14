@@ -211,7 +211,8 @@ void ext4_evict_inode(struct inode *inode)
 		 * don't use page cache.
 		 */
 		if (inode->i_ino != EXT4_JOURNAL_INO &&
-		    ext4_should_journal_data(inode) &&
+		    (ext4_should_journal_data(inode) ||
+			ext4_should_journal_plus(inode)) &&
 		    S_ISREG(inode->i_mode) && inode->i_data.nrpages) {
 			journal_t *journal = EXT4_SB(inode->i_sb)->s_journal;
 			tid_t commit_tid = EXT4_I(inode)->i_datasync_tid;
@@ -1330,13 +1331,7 @@ retry_journal:
 	return ret;
 }
 
-/**
- * @brief EXT4 Data Journaling Plus API
- * 
- */
-#ifdef CONFIG_EXT4_DJPLUS
-
-static int ext4djp_write_begin(struct file *file, struct address_space *mapping,
+static int ext4jp_write_begin(struct file *file, struct address_space *mapping,
 			    loff_t pos, unsigned len,
 			    struct page **pagep, void **fsdata)
 {
@@ -1345,8 +1340,6 @@ static int ext4djp_write_begin(struct file *file, struct address_space *mapping,
 	struct page *page;
 	pgoff_t index;
 	unsigned from, to;
-
-	BUG_ON(!ext4_should_journal_data(inode));
 
 	if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb))))
 		return -EIO;
@@ -1406,8 +1399,6 @@ retry_grab:
 	return ret;
 }
 
-#endif /* CONFIG_EXT4_DJPLUS */
-
 /* For write_end() in data=journal mode */
 static int write_end_fn(handle_t *handle, struct inode *inode,
 			struct buffer_head *bh)
@@ -1416,15 +1407,7 @@ static int write_end_fn(handle_t *handle, struct inode *inode,
 	if (!buffer_mapped(bh) || buffer_freed(bh))
 		return 0;
 	set_buffer_uptodate(bh);
-
-	/* (Jaehwan) Redundant code, delay buffer cannot get here */
-#ifdef CONFIG_EXT4_DJPLUS
-	if (!buffer_delay(bh))
-		ret = ext4_handle_dirty_metadata(handle, NULL, bh);
-#else
 	ret = ext4_handle_dirty_metadata(handle, NULL, bh);
-#endif
-
 	clear_buffer_meta(bh);
 	clear_buffer_prio(bh);
 	return ret;
@@ -1539,8 +1522,7 @@ static void ext4_journalled_zero_new_buffers(handle_t *handle,
 	} while (bh != head);
 }
 
-#ifdef CONFIG_EXT4_DJPLUS
-static int ext4djp_journalled_write_end(struct file *file,
+static int ext4jp_write_end(struct file *file,
 				     struct address_space *mapping,
 				     loff_t pos, unsigned len, unsigned copied,
 				     struct page *page, void *fsdata)
@@ -1625,7 +1607,6 @@ static int ext4djp_journalled_write_end(struct file *file,
 	return ret ? ret : copied;
 }
 
-#else
 static int ext4_journalled_write_end(struct file *file,
 				     struct address_space *mapping,
 				     loff_t pos, unsigned len, unsigned copied,
@@ -1701,8 +1682,6 @@ static int ext4_journalled_write_end(struct file *file,
 
 	return ret ? ret : copied;
 }
-
-#endif /* CONFIG_EXT4_DJPLUS */
 
 /*
  * Reserve space for a single cluster
@@ -2112,14 +2091,12 @@ int ext4_da_get_block_prep(struct inode *inode, sector_t iblock,
 	return 0;
 }
 
-#ifdef CONFIG_EXT4_DJPLUS
-
 /**
  * @brief Check status of extent status tree
  * 
  * @return ret=0 if delayed, ret>0 if allocated, ret<0 if error
  */
-static int ext4djp_check_da_block(struct inode *inode,
+static int ext4jp_check_da_block(struct inode *inode,
 								struct ext4_map_blocks *map)
 {
 	struct extent_status es;
@@ -2169,7 +2146,7 @@ ret:
  *
  * @return int (nr append blocks, <0: error)
  */
-int ext4djp_count_nr_append(struct inode *inode, loff_t pos, ssize_t len)
+int ext4jp_count_nr_append(struct inode *inode, loff_t pos, ssize_t len)
 {
 	struct ext4_map_blocks map;
 	sector_t iblock, end;
@@ -2184,7 +2161,7 @@ int ext4djp_count_nr_append(struct inode *inode, loff_t pos, ssize_t len)
 
 	for (i = 0; i < end - iblock + 1; i++) {
 		map.m_lblk = iblock + i;
-		ret = ext4djp_check_da_block(inode, &map);
+		ret = ext4jp_check_da_block(inode, &map);
 		if (ret < 0) {
 			retval = ret;
 			goto ret;
@@ -2203,9 +2180,6 @@ ret:
 	return retval;
 }
 
-#endif /* CONFIG_EXT4_DJPLUS */
-
-
 static int __ext4_journalled_writepage(struct page *page,
 				       unsigned int len)
 {
@@ -2217,9 +2191,7 @@ static int __ext4_journalled_writepage(struct page *page,
 	struct buffer_head *inode_bh = NULL;
 	loff_t size;
 
-#ifdef CONFIG_EXT4_DJPLUS
 	// SetPageChecked called on ext4_journalled_dirty_folio(), only for mmapped file
-#endif
 
 	ClearPageChecked(page);
 
@@ -3505,7 +3477,7 @@ out_writepages:
 	return ret;
 }
 
-static int ext4djp_writepages(struct address_space *mapping,
+static int ext4jp_writepages(struct address_space *mapping,
 			   struct writeback_control *wbc)
 {
 	// (junbong): Copy from ext4_writepages
@@ -4322,15 +4294,26 @@ static const struct address_space_operations ext4_aops = {
 static const struct address_space_operations ext4_journalled_aops = {
 	.read_folio		= ext4_read_folio,
 	.readahead		= ext4_readahead,
-#ifdef CONFIG_EXT4_DJPLUS
-	.writepages		= ext4djp_writepages,
-	.write_begin		= ext4djp_write_begin,
-	.write_end		= ext4djp_journalled_write_end,
-#else
 	.writepages		= ext4_writepages,
 	.write_begin		= ext4_write_begin,
 	.write_end		= ext4_journalled_write_end,
-#endif
+	.dirty_folio		= ext4_journalled_dirty_folio,
+	.bmap			= ext4_bmap,
+	.invalidate_folio	= ext4_journalled_invalidate_folio,
+	.release_folio		= ext4_release_folio,
+	.direct_IO		= noop_direct_IO,
+	.migrate_folio		= buffer_migrate_folio_norefs,
+	.is_partially_uptodate  = block_is_partially_uptodate,
+	.error_remove_page	= generic_error_remove_page,
+	.swap_activate		= ext4_iomap_swap_activate,
+};
+
+static const struct address_space_operations ext4_journalled_plus_aops = {
+	.read_folio		= ext4_read_folio,
+	.readahead		= ext4_readahead,
+	.writepages		= ext4jp_writepages,
+	.write_begin		= ext4jp_write_begin,
+	.write_end		= ext4jp_write_end,
 	.dirty_folio		= ext4_journalled_dirty_folio,
 	.bmap			= ext4_bmap,
 	.invalidate_folio	= ext4_journalled_invalidate_folio,
@@ -4375,6 +4358,9 @@ void ext4_set_aops(struct inode *inode)
 		break;
 	case EXT4_INODE_JOURNAL_DATA_MODE:
 		inode->i_mapping->a_ops = &ext4_journalled_aops;
+		return;
+	case EXT4_INODE_JOURNAL_PLUS_MODE:
+		inode->i_mapping->a_ops = &ext4_journalled_plus_aops;
 		return;
 	default:
 		BUG();
@@ -4452,7 +4438,7 @@ static int __ext4_block_zero_page_range(handle_t *handle,
 			}
 		}
 	}
-	if (ext4_should_journal_data(inode)) {
+	if (ext4_should_journal_data(inode) || ext4_should_journal_plus(inode)) {
 		BUFFER_TRACE(bh, "get write access");
 		err = ext4_journal_get_write_access(handle, inode->i_sb, bh,
 						    EXT4_JTR_NONE);
@@ -4462,7 +4448,7 @@ static int __ext4_block_zero_page_range(handle_t *handle,
 	zero_user(page, offset, length);
 	BUFFER_TRACE(bh, "zeroed end of block");
 
-	if (ext4_should_journal_data(inode)) {
+	if (ext4_should_journal_data(inode) || ext4_should_journal_plus(inode)) {
 		err = ext4_handle_dirty_metadata(handle, inode, bh);
 	} else {
 		err = 0;
@@ -5302,6 +5288,8 @@ static bool ext4_should_enable_dax(struct inode *inode)
 	if (!S_ISREG(inode->i_mode))
 		return false;
 	if (ext4_should_journal_data(inode))
+		return false;
+	if (ext4_should_journal_plus(inode))
 		return false;
 	if (ext4_has_inline_data(inode))
 		return false;
@@ -6195,7 +6183,8 @@ int ext4_setattr(struct user_namespace *mnt_userns, struct dentry *dentry,
 			if (!shrink) {
 				pagecache_isize_extended(inode, oldsize,
 							 inode->i_size);
-			} else if (ext4_should_journal_data(inode)) {
+			} else if (ext4_should_journal_data(inode) ||
+				   ext4_should_journal_plus(inode)) {
 				ext4_wait_for_tail_page_commit(inode);
 			}
 		}
@@ -6248,6 +6237,8 @@ u32 ext4_dio_alignment(struct inode *inode)
 	if (fsverity_active(inode))
 		return 0;
 	if (ext4_should_journal_data(inode))
+		return 0;
+	if (ext4_should_journal_plus(inode))
 		return 0;
 	if (ext4_has_inline_data(inode))
 		return 0;
@@ -6432,14 +6423,12 @@ int ext4_writepage_trans_blocks(struct inode *inode)
 	return ret;
 }
 
-#ifdef CONFIG_EXT4_DJPLUS
-int ext4djp_writepage_trans_blocks(struct inode *inode, size_t cnt)
+int ext4jp_writepage_trans_blocks(struct inode *inode, size_t cnt)
 {
 	int	bpp = ext4_journal_blocks_per_page(inode);
 
 	return ext4_meta_trans_blocks(inode, bpp, bpp);
 }
-#endif
 
 /*
  * Calculate the journal credits for a chunk of data modification.

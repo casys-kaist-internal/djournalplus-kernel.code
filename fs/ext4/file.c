@@ -267,15 +267,53 @@ static ssize_t ext4_write_checks(struct kiocb *iocb, struct iov_iter *from)
 	return count;
 }
 
-static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
-					struct iov_iter *from)
+/**
+ * @brief For multi-block atomic write, start handle outside perform_write
+ * 
+ * @note inode_lock is held by caller
+ */
+static ssize_t ext4jp_buffered_write_iter(struct kiocb *iocb,
+					struct iov_iter *from, struct inode *inode)
 {
-#ifdef CONFIG_EXT4_DJPLUS
+	ssize_t ret;
 	handle_t *handle = NULL;
 	int needed_blocks, nr_blks, nr_append;
 	unsigned int block_size;
-#endif
 
+	/* Total data blocks */
+	block_size =  1 << inode->i_sb->s_blocksize_bits;
+	nr_blks = (from->count + block_size - 1) / block_size;
+
+	/* How many blocks to be appended (for dealloc) */
+	nr_append = ext4jp_count_nr_append(inode, iocb->ki_pos, from->count);
+	if (nr_append < 0) {
+		pr_err("ext4jp_count_nr_append failed (%d).\n", nr_append);
+		return nr_append;
+	}
+	BUG_ON(nr_append > nr_blks);
+
+	needed_blocks = ext4jp_writepage_trans_blocks(inode, from->count);
+	needed_blocks += (nr_blks - nr_append);
+
+	handle = ext4_journal_start(inode, EXT4_HT_WRITE_PAGE, needed_blocks);
+	if (IS_ERR(handle))
+		return PTR_ERR(handle);
+
+	current->backing_dev_info = inode_to_bdi(inode);
+	ret = generic_perform_write(iocb, from);
+	current->backing_dev_info = NULL;
+
+	if (nr_append) /* We did dealloc some block. */
+		ext4djp_alloc_on_commit_or_stop(handle, inode);
+	else /* We did not dealloc any block. */
+		ext4_journal_stop(handle);
+
+	return ret;
+}
+
+static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
+					struct iov_iter *from)
+{
 	ssize_t ret;
 	struct inode *inode = file_inode(iocb->ki_filp);
 
@@ -287,47 +325,14 @@ static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 	if (ret <= 0)
 		goto out;
 
-#ifdef CONFIG_EXT4_DJPLUS
-	if (ext4_should_journal_data(inode)) {
-		/* Total data blocks */
-		block_size =  1 << inode->i_sb->s_blocksize_bits;
-		nr_blks = (from->count + block_size - 1) / block_size;
-
-		/* How many blocks to be appended (for dealloc) */
-		nr_append = ext4djp_count_nr_append(inode, iocb->ki_pos, from->count);
-		if (nr_append < 0) {
-			pr_err("ext4djp_count_nr_append failed (%d).\n", nr_append);
-			ret = nr_append;
-			goto out;
-		}
-		BUG_ON(nr_append > nr_blks);
-
-		needed_blocks = ext4djp_writepage_trans_blocks(inode, from->count);
-		needed_blocks += (nr_blks - nr_append);
-
-		handle = ext4_journal_start(inode, EXT4_HT_WRITE_PAGE, needed_blocks);
-		if (IS_ERR(handle)) {
-			ret = PTR_ERR(handle);
-			goto out;
-		}
+	if (ext4_should_journal_plus(inode)) {
+		ret = ext4jp_buffered_write_iter(iocb, from, inode);
+		goto out;
 	}
-#endif
 
 	current->backing_dev_info = inode_to_bdi(inode);
 	ret = generic_perform_write(iocb, from);
 	current->backing_dev_info = NULL;
-
-#ifdef CONFIG_EXT4_DJPLUS
-	if (ext4_should_journal_data(inode)) {
-		if (nr_append)
-			/* We did dealloc some block. */
-			ext4djp_alloc_on_commit_or_stop(handle, inode);
-		else {
-			/* We did not dealloc any block. */
-			ext4_journal_stop(handle);
-		}
-	}
-#endif
 
 out:
 	inode_unlock(inode);

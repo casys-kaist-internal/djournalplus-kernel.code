@@ -11,6 +11,9 @@ int ext4_inode_journal_mode(struct inode *inode)
 {
 	if (EXT4_JOURNAL(inode) == NULL)
 		return EXT4_INODE_WRITEBACK_DATA_MODE;	/* writeback */
+	/* Data journal plus mode */
+	if (test_opt2(inode->i_sb, JOURNAL_PLUS))
+		return EXT4_INODE_JOURNAL_PLUS_MODE;
 	/* We do not support data journalling with delayed allocation */
 	if (!S_ISREG(inode->i_mode) ||
 	    ext4_test_inode_flag(inode, EXT4_INODE_EA_INODE) ||

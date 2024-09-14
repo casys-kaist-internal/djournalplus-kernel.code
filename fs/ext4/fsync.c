@@ -170,6 +170,8 @@ int ext4_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 		ret = ext4_fsync_nojournal(inode, datasync, &needs_barrier);
 	else if (ext4_should_journal_data(inode))
 		ret = ext4_force_commit(inode->i_sb);
+	else if (ext4_should_journal_plus(inode))
+		ret = ext4_force_commit(inode->i_sb);
 	else
 		ret = ext4_fsync_journal(inode, datasync, &needs_barrier);
 

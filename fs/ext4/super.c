@@ -556,7 +556,7 @@ static int ext4_journal_submit_inode_data_buffers(struct jbd2_inode *jinode)
 {
 	int ret;
 
-	if (false && ext4_should_journal_data(jinode->i_vfs_inode))
+	if (ext4_should_journal_data(jinode->i_vfs_inode))
 		ret = ext4_journalled_submit_inode_data_buffers(jinode);
 	else
 		ret = ext4_normal_submit_inode_data_buffers(jinode);
@@ -1613,6 +1613,7 @@ enum {
 #ifdef CONFIG_EXT4_DEBUG
 	Opt_fc_debug_max_replay, Opt_fc_debug_force
 #endif
+	Opt_data_journal_plus
 };
 
 static const struct constant_table ext4_param_errors[] = {
@@ -1690,6 +1691,7 @@ static const struct fs_parameter_spec ext4_param_specs[] = {
 	fsparam_flag	("nojournal_checksum",	Opt_nojournal_checksum),
 	fsparam_flag	("journal_async_commit",Opt_journal_async_commit),
 	fsparam_flag	("abort",		Opt_abort),
+	fsparam_flag	("data_journal_plus",	Opt_data_journal_plus),
 	fsparam_enum	("data",		Opt_data, ext4_param_data),
 	fsparam_enum	("data_err",		Opt_data_err,
 						ext4_param_data_err),
@@ -1849,6 +1851,8 @@ static const struct mount_opts {
 	{Opt_fc_debug_force, EXT4_MOUNT2_JOURNAL_FAST_COMMIT,
 	 MOPT_SET | MOPT_2 | MOPT_EXT4_ONLY},
 #endif
+	{Opt_data_journal_plus, EXT4_MOUNT2_JOURNAL_PLUS,
+		MOPT_SET | MOPT_2 | MOPT_EXT4_ONLY},
 	{Opt_err, 0, 0}
 };
 
@@ -4871,6 +4875,11 @@ static int ext4_load_and_init_journal(struct super_block *sb,
 		 */
 		if (jbd2_journal_check_available_features
 		    (sbi->s_journal, 0, 0, JBD2_FEATURE_INCOMPAT_REVOKE)) {
+			if (test_opt2(sb, JOURNAL_PLUS)) {
+				ext4_msg(sb, KERN_ERR, "Journal Plus does not support "
+					"ORDERED(default) mode");
+				goto out;
+			}
 			set_opt(sb, ORDERED_DATA);
 			sbi->s_def_mount_opt |= EXT4_MOUNT_ORDERED_DATA;
 		} else {
@@ -4881,6 +4890,11 @@ static int ext4_load_and_init_journal(struct super_block *sb,
 
 	case EXT4_MOUNT_ORDERED_DATA:
 	case EXT4_MOUNT_WRITEBACK_DATA:
+		if (test_opt2(sb, JOURNAL_PLUS)) {
+			ext4_msg(sb, KERN_ERR, "Journal Plus does not support "
+			       "ORDERED/WRITEBACK mode");
+			goto out;
+		}
 		if (!jbd2_journal_check_available_features
 		    (sbi->s_journal, 0, 0, JBD2_FEATURE_INCOMPAT_REVOKE)) {
 			ext4_msg(sb, KERN_ERR, "Journal does not support "
@@ -5684,13 +5698,11 @@ static int ext4_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto free_sbi;
 
 	if (sbi->s_journal) {
-#ifdef CONFIG_EXT4_DJPLUS
 		if (test_opt(sb, DATA_FLAGS) == EXT4_MOUNT_JOURNAL_DATA)
-			descr = " journalled data plus (DJPLUS) mode";
-#else
-		if (test_opt(sb, DATA_FLAGS) == EXT4_MOUNT_JOURNAL_DATA)
-			descr = " journalled data mode";
-#endif
+			if (test_opt2(sb, JOURNAL_PLUS))
+				descr = " journalled data plus mode (DJPLUS)";
+			else
+				descr = " journalled data mode";
 		else if (test_opt(sb, DATA_FLAGS) == EXT4_MOUNT_ORDERED_DATA)
 			descr = " ordered data mode";
 		else
@@ -6434,6 +6446,12 @@ static int __ext4_remount(struct fs_context *fc, struct super_block *sb)
 		if (test_opt(sb, JOURNAL_ASYNC_COMMIT)) {
 			ext4_msg(sb, KERN_ERR, "can't mount with "
 				"journal_async_commit in data=ordered mode");
+			err = -EINVAL;
+			goto restore_opts;
+		}
+		if (test_opt2(sb, JOURNAL_PLUS)) {
+			ext4_msg(sb, KERN_ERR, "can't mount with "
+				"data_journal_plus in data=ordered mode");
 			err = -EINVAL;
 			goto restore_opts;
 		}
