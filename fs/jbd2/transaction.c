@@ -2754,7 +2754,7 @@ int jbd2_journal_inode_ranged_wait(handle_t *handle, struct jbd2_inode *jinode,
 			start_byte, start_byte + length - 1);
 }
 
-int jbd2djp_journal_inode_pre_commit(handle_t *handle, struct jbd2_inode *jinode)
+int jbd2jp_journal_inode_pre_commit(handle_t *handle, struct jbd2_inode *jinode)
 {
 	transaction_t *transaction = handle->h_transaction;
 	journal_t *journal = transaction->t_journal;
@@ -2789,7 +2789,7 @@ int jbd2djp_journal_inode_pre_commit(handle_t *handle, struct jbd2_inode *jinode
 	current->journal_info = NULL;
 	jinode->i_handle = handle;
 
-	list_add(&jinode->i_djp_list, &transaction->t_dealloc_list);
+	list_add(&jinode->i_jp_list, &transaction->t_dealloc_list);
 	if (atomic_read(&transaction->t_updates) <=
 			atomic_add_return(1, &transaction->t_dealloc_updates))
 		wake_up(&journal->j_wait_updates);

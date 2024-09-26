@@ -304,7 +304,7 @@ static ssize_t ext4jp_buffered_write_iter(struct kiocb *iocb,
 	current->backing_dev_info = NULL;
 
 	if (nr_append) /* We did dealloc some block. */
-		ext4djp_alloc_on_commit_or_stop(handle, inode);
+		ext4jp_alloc_on_commit_or_stop(handle, inode);
 	else /* We did not dealloc any block. */
 		ext4_journal_stop(handle);
 

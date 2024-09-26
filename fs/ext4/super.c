@@ -518,12 +518,12 @@ out:
 	return AOP_WRITEPAGE_ACTIVATE;
 }
 
-static void ext4djp_alloc_on_commit_callback(journal_t *journal, transaction_t *transaction)
+static void ext4jp_alloc_on_commit_callback(journal_t *journal, transaction_t *transaction)
 {
 	struct jbd2_inode *jinode, *next_j;
 
 	list_for_each_entry_safe(jinode, next_j,
-				&transaction->t_dealloc_list, i_djp_list) {
+				&transaction->t_dealloc_list, i_jp_list) {
 		BUG_ON(!jinode->i_handle);
 		BUG_ON(current->journal_info);
 		current->journal_info = jinode->i_handle;
@@ -533,7 +533,7 @@ static void ext4djp_alloc_on_commit_callback(journal_t *journal, transaction_t *
 			filemap_fdatawrite(jinode->i_vfs_inode->i_mapping);
 		ext4_journal_stop(current->journal_info);
 		write_lock(&journal->j_state_lock);
-		list_del(&jinode->i_djp_list);
+		list_del(&jinode->i_jp_list);
 	}
 }
 
@@ -5496,7 +5496,7 @@ static int __ext4_fill_super(struct fs_context *fc, struct super_block *sb)
 
 #ifdef CONFIG_EXT4_DJPLUS
 	if (test_opt(sb, JOURNAL_DATA))
-		sbi->s_journal->j_pre_commit_callback = ext4djp_alloc_on_commit_callback;
+		sbi->s_journal->j_pre_commit_callback = ext4jp_alloc_on_commit_callback;
 #endif
 
 	block = ext4_count_free_clusters(sb);

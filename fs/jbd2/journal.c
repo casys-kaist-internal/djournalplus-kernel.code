@@ -3044,7 +3044,7 @@ void jbd2_journal_init_jbd_inode(struct jbd2_inode *jinode, struct inode *inode)
 	jinode->i_dirty_end = 0;
 	jinode->i_handle = NULL;
 	INIT_LIST_HEAD(&jinode->i_list);
-	INIT_LIST_HEAD(&jinode->i_djp_list);
+	INIT_LIST_HEAD(&jinode->i_jp_list);
 }
 
 /*

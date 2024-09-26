@@ -454,7 +454,7 @@ struct jbd2_inode {
 	loff_t i_dirty_end;
 
 #ifdef CONFIG_EXT4_DJPLUS
-	struct list_head	i_djp_list;
+	struct list_head	i_jp_list;
 	handle_t		*i_handle;
 #endif
 };
@@ -1593,7 +1593,7 @@ extern int	   jbd2_journal_inode_ranged_write(handle_t *handle,
 extern int	   jbd2_journal_inode_ranged_wait(handle_t *handle,
 			struct jbd2_inode *inode, loff_t start_byte,
 			loff_t length);
-extern int	   jbd2djp_journal_inode_pre_commit(
+extern int	   jbd2jp_journal_inode_pre_commit(
 			handle_t *handle, struct jbd2_inode *jinode);
 extern int	   jbd2_journal_submit_inode_data_buffers(
 			struct jbd2_inode *jinode);

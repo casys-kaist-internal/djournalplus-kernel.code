@@ -55,7 +55,7 @@
 
 #include <trace/events/ext4.h>
 
-// (junbong): For calling from ext4djp_journalled_write_end
+// (junbong): For calling from ext4jp_journalled_write_end
 static int ext4_da_write_end(struct file *file,
 			     struct address_space *mapping,
 			     loff_t pos, unsigned len, unsigned copied,
@@ -1068,7 +1068,7 @@ int do_journal_get_write_access(handle_t *handle, struct inode *inode,
 	return ret;
 }
 
-int djp_do_journal_get_write_access(handle_t *handle, struct inode *inode,
+int jp_do_journal_get_write_access(handle_t *handle, struct inode *inode,
 				struct buffer_head *bh)
 {
 	// (junbong): Copy from do_journal_get_write_access
@@ -1344,7 +1344,7 @@ static int ext4jp_write_begin(struct file *file, struct address_space *mapping,
 	if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb))))
 		return -EIO;
 
-	trace_ext4djp_write_begin(inode, pos, len);
+	trace_ext4jp_write_begin(inode, pos, len);
 
 	index = pos >> PAGE_SHIFT;
 	from = pos & (PAGE_SIZE - 1);
@@ -1386,7 +1386,7 @@ retry_grab:
 	if (!ret) {
 		ret = ext4_walk_page_buffers(journal_current_handle(), inode,
 					     page_buffers(page), from, to, NULL,
-					     djp_do_journal_get_write_access);
+					     jp_do_journal_get_write_access);
 	}
 
 	if (ret) {
@@ -1539,7 +1539,7 @@ static int ext4jp_write_end(struct file *file,
 	if (buffer_delay(page_buffers(page)))
 		return ext4_da_write_end(file, mapping, pos, len, copied, page, fsdata);
 
-	trace_ext4djp_journalled_write_end(inode, pos, len, copied);
+	trace_ext4jp_journalled_write_end(inode, pos, len, copied);
 	from = pos & (PAGE_SIZE - 1);
 	to = from + len;
 
@@ -2120,7 +2120,7 @@ static int ext4jp_check_da_block(struct inode *inode,
 	}
 
 	if (ext4_has_inline_data(inode)) {
-		printk(KERN_ERR "[%s] djp not support inline data\n", __func__);
+		printk(KERN_ERR "[%s] jp not support inline data\n", __func__);
 		return -EIO;
 	}
 
@@ -2133,7 +2133,7 @@ static int ext4jp_check_da_block(struct inode *inode,
 	if (ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS))
 		retval = ext4_ext_map_blocks(NULL, inode, map, 0);
 	else {
-		printk(KERN_ERR "[%s] djp not support indirect data\n", __func__);
+		printk(KERN_ERR "[%s] jp not support indirect data\n", __func__);
 		retval = -EIO;
 	}
 	up_read((&EXT4_I(inode)->i_data_sem));
@@ -3013,7 +3013,7 @@ static int ext4_writepage_cb(struct page *page, struct writeback_control *wbc,
 	return ext4_writepage(page, wbc);
 }
 
-static int ext4djp_do_writepages(struct mpage_da_data *mpd)
+static int ext4jp_do_writepages(struct mpage_da_data *mpd)
 {
 	// (junbong): Copy from ext4_do_writepages
 	struct writeback_control *wbc = mpd->wbc;
@@ -3493,7 +3493,7 @@ static int ext4jp_writepages(struct address_space *mapping,
 		return -EIO;
 
 	percpu_down_read(&EXT4_SB(sb)->s_writepages_rwsem);
-	ret = ext4djp_do_writepages(&mpd);
+	ret = ext4jp_do_writepages(&mpd);
 	percpu_up_read(&EXT4_SB(sb)->s_writepages_rwsem);
 
 	return ret;
