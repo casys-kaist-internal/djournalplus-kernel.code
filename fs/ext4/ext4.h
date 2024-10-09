@@ -3853,6 +3853,7 @@ static inline int ext4_buffer_uptodate(struct buffer_head *bh)
 
 extern int ext4jp_writepage_trans_blocks(struct inode *inode, size_t cnt);
 extern int ext4jp_count_nr_append(struct inode *inode, loff_t pos, ssize_t len);
+extern struct page **ext4jp_prepare_pages(struct inode *, struct kiocb *, int nr);
 
 /* Print for debugging */
 #define jp_print(f, a...)						\

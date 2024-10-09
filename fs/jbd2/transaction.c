@@ -2080,8 +2080,39 @@ static void __jbd2_journal_temp_unlink_buffer(struct journal_head *jh)
 	jh->b_jlist = BJ_None;
 	if (transaction && is_journal_aborted(transaction->t_journal))
 		clear_buffer_jbddirty(bh);
-	else if (test_clear_buffer_jbddirty(bh))
-		mark_buffer_dirty(bh);	/* Expose it to the VM */
+	else if (test_clear_buffer_jbddirty(bh)) {
+		/* Expose only file data to the VM
+		 * Prevent contention on writeback of filesystem metadata block
+		 * Additionally, they are not predictable on write operation */
+		if (transaction->t_journal->j_flags & JBD2_EXT4_JOURNAL_PLUS) {
+			struct inode *inode;
+
+			if (!bh->b_page->mapping || !bh->b_page->mapping->host) {
+				printk("[%llu] Not have page struct!! #### \n", bh->b_blocknr);
+				mark_buffer_dirty(bh);
+				return;
+			}
+
+			inode = bh->b_page->mapping->host;
+			if(S_ISBLK(inode->i_mode)) {
+				printk("[device %s] blk:%llu\n",
+							bh->b_bdev->bd_disk->disk_name, bh->b_blocknr);
+			} else {
+				// if (S_ISREG(inode->i_mode))
+				// 	printk("[%llu] is part of regular file (ino %lu)\n",
+				// 			bh->b_blocknr, inode->i_ino);
+				// else if (S_ISDIR(inode->i_mode))
+				// 	printk("[%llu] is part of directory file (ino %lu)\n",
+				// 			bh->b_blocknr, inode->i_ino);
+				// else
+				// 	printk("?mode %d bh[%llu] is part of directory file (ino %lu)\n",
+				// 			inode->i_mode, bh->b_blocknr, inode->i_ino);
+				mark_buffer_dirty(bh);
+			}
+		}
+		else
+			mark_buffer_dirty(bh);	/* Expose it to the VM */
+	}
 }
 
 /*

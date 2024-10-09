@@ -17,6 +17,7 @@
  *        David S. Miller (davem@caip.rutgers.edu), 1995
  */
 
+#include "linux/jbd2.h"
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/fs.h>
@@ -6014,6 +6015,11 @@ static int ext4_load_journal(struct super_block *sb,
 	    journal_inum != le32_to_cpu(es->s_journal_inum)) {
 		es->s_journal_inum = cpu_to_le32(journal_inum);
 		ext4_commit_super(sb);
+	}
+
+	if(test_opt2(sb, JOURNAL_PLUS)) {
+		journal->j_flags |= JBD2_EXT4_JOURNAL_PLUS;
+		ext4_msg(sb, KERN_INFO, "Set jbd2 journal plus mode");
 	}
 
 	return 0;

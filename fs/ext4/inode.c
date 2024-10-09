@@ -22,6 +22,9 @@
 /* EXT4_DJPLUS */
 #include "asm/page_types.h"
 #include "ext4.h"
+#include "linux/err.h"
+#include "linux/mm.h"
+#include "linux/page-flags.h"
 #include <linux/jbd2.h>
 #include <linux/types.h>
 
@@ -55,7 +58,6 @@
 
 #include <trace/events/ext4.h>
 
-// (junbong): For calling from ext4jp_journalled_write_end
 static int ext4_da_write_end(struct file *file,
 			     struct address_space *mapping,
 			     loff_t pos, unsigned len, unsigned copied,
@@ -1292,6 +1294,11 @@ retry_journal:
 					     do_journal_get_write_access);
 	}
 
+	if (PageDirty(page))
+		printk("[2]page dirty pos %llu len %d\n", pos, len);
+	else
+		printk("[2]page not dirty pos %llu len %d\n", pos, len);
+
 	if (ret) {
 		bool extended = (pos + len > inode->i_size) &&
 				!ext4_verity_in_progress(inode);
@@ -1336,66 +1343,31 @@ static int ext4jp_write_begin(struct file *file, struct address_space *mapping,
 			    struct page **pagep, void **fsdata)
 {
 	struct inode *inode = mapping->host;
-	int ret;
 	struct page *page;
-	pgoff_t index;
+	int ret;
 	unsigned from, to;
+
+	BUG_ON(ext4_test_inode_state(inode, EXT4_STATE_MAY_INLINE_DATA));
 
 	if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb))))
 		return -EIO;
 
 	trace_ext4jp_write_begin(inode, pos, len);
 
-	index = pos >> PAGE_SHIFT;
 	from = pos & (PAGE_SIZE - 1);
 	to = from + len;
-
-	if (ext4_test_inode_state(inode, EXT4_STATE_MAY_INLINE_DATA)) {
-		// (junbong): We do not handle inode inline data case.
-		BUG();
-		return -EIO;
-	}
-
-	/*
-	 * grab_cache_page_write_begin() can take a long time if the
-	 * system is thrashing due to memory pressure, or if the page
-	 * is being written back.  So grab it first before we start
-	 * the transaction handle.  This also allows us to allocate
-	 * the page (if needed) without using GFP_NOFS.
-	 */
-retry_grab:
-	page = grab_cache_page_write_begin(mapping, index);
-	if (!page)
-		return -ENOMEM;
-
-	if (!page_has_buffers(page))
-		create_empty_buffers(page, inode->i_sb->s_blocksize, 0);
-
-	if (page->mapping != mapping) {
-		/* The page got truncated from under us */
-		unlock_page(page);
-		put_page(page);
-		goto retry_grab;
-	}
-	/* In case writeback began while the page was unlocked */
-	wait_for_stable_page(page);
+	page = *pagep;
+	BUG_ON(!page || PageWriteback(page));
 
 	// TODO: change to delayed allocation enabled selective journaling
 	ret = __block_write_begin(page, pos, len, ext4_da_get_block_prep);
-
 	if (!ret) {
 		ret = ext4_walk_page_buffers(journal_current_handle(), inode,
 					     page_buffers(page), from, to, NULL,
 					     jp_do_journal_get_write_access);
-	}
+	} else
+		printk(KERN_ERR "[%s] not implemented yet (%d)\n", __func__, ret);
 
-	if (ret) {
-		printk(KERN_ERR "[%s] not implemented yet error code(%d)\n", __func__, ret);
-		unlock_page(page);
-		put_page(page);
-		return ret;
-	}
-	*pagep = page;
 	return ret;
 }
 
@@ -1544,12 +1516,7 @@ static int ext4jp_write_end(struct file *file,
 	to = from + len;
 
 	BUG_ON(!ext4_handle_valid(handle));
-
-	if (ext4_has_inline_data(inode)) {
-		printk(KERN_ERR "[%s] not support inline data\n", __func__);
-		BUG();
-		return ext4_write_inline_data_end(inode, pos, len, copied, page);
-	}
+	BUG_ON(ext4_has_inline_data(inode));
 
 	if (unlikely(copied < len) && !PageUptodate(page)) {
 		printk(KERN_ERR "[%s] not implemented yet\n", __func__);
@@ -1574,6 +1541,7 @@ static int ext4jp_write_end(struct file *file,
 		size_changed = ext4_update_inode_size(inode, pos + copied);
 	ext4_set_inode_state(inode, EXT4_STATE_JDATA);
 	EXT4_I(inode)->i_datasync_tid = handle->h_transaction->t_tid;
+	ClearPageChecked(page);
 	unlock_page(page);
 	put_page(page);
 
@@ -2120,7 +2088,7 @@ static int ext4jp_check_da_block(struct inode *inode,
 	}
 
 	if (ext4_has_inline_data(inode)) {
-		printk(KERN_ERR "[%s] jp not support inline data\n", __func__);
+		printk(KERN_ERR "[%s] not support inline data\n", __func__);
 		return -EIO;
 	}
 
@@ -2133,7 +2101,7 @@ static int ext4jp_check_da_block(struct inode *inode,
 	if (ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS))
 		retval = ext4_ext_map_blocks(NULL, inode, map, 0);
 	else {
-		printk(KERN_ERR "[%s] jp not support indirect data\n", __func__);
+		printk(KERN_ERR "[%s] not support indirect data\n", __func__);
 		retval = -EIO;
 	}
 	up_read((&EXT4_I(inode)->i_data_sem));
@@ -2150,12 +2118,14 @@ int ext4jp_count_nr_append(struct inode *inode, loff_t pos, ssize_t len)
 {
 	struct ext4_map_blocks map;
 	sector_t iblock, end;
-	unsigned blocksize, count = 0;
+	unsigned blk_per_page, count = 0;
+	pgoff_t index;
 	int i, ret, retval = 0;
 
-	blocksize = PAGE_SHIFT - inode->i_blkbits;
-	iblock = (sector_t)pos >> PAGE_SHIFT << blocksize;
-	end = (sector_t)(pos + len - 1) >> PAGE_SHIFT << blocksize;
+	blk_per_page = PAGE_SHIFT - inode->i_blkbits;
+	iblock = (sector_t)pos >> PAGE_SHIFT << blk_per_page;
+	end = (sector_t)(pos + len - 1) >> PAGE_SHIFT << blk_per_page;
+	index = pos >> PAGE_SHIFT;
 
 	map.m_len = 1;
 
@@ -2173,12 +2143,62 @@ int ext4jp_count_nr_append(struct inode *inode, loff_t pos, ssize_t len)
 			i += (ret - 1); // skip contiguously alloced blocks
 	}
 
-
 	retval = count;
 
 ret:
 	return retval;
 }
+
+struct page **ext4jp_prepare_pages(struct inode *inode, struct kiocb *iocb, int nr)
+{
+	struct page **pages;
+	struct page *page;
+	struct address_space *mapping = iocb->ki_filp->f_mapping;
+	loff_t pos = iocb->ki_pos;
+	pgoff_t index;
+	int i;
+
+	pages = kcalloc(nr, sizeof(struct page *), GFP_KERNEL);
+	if (!pages) {
+		pr_alert("Not enough memory");
+		return NULL;
+	}
+
+	index = pos >> PAGE_SHIFT;
+
+	for (i = 0; i < nr; i++) {
+	retry_grab:
+		page = grab_cache_page_write_begin(mapping, index + i);
+		if (!page) {
+			pr_err("failed to grab page");
+			goto err;
+		}
+		if (!page_has_buffers(page))
+			create_empty_buffers(page, inode->i_sb->s_blocksize, 0);
+
+		if (page->mapping != mapping) {
+		/* The page got truncated from under us */
+			unlock_page(page);
+			put_page(page);
+			goto retry_grab;
+		}
+
+		SetPageChecked(page); // Prevent writeback from bg worker
+		unlock_page(page);
+		pages[i] = page;
+	}
+
+	return pages; // On success
+
+err:
+	while (--i > 0) {
+		page = pages[i];
+		put_page(page);
+	}
+	kfree(pages);
+	return NULL;
+}
+
 
 static int __ext4_journalled_writepage(struct page *page,
 				       unsigned int len)
@@ -2949,6 +2969,13 @@ static int mpage_prepare_extent_to_map(struct mpage_da_data *mpd)
 				continue;
 			}
 
+			/* Not writeback this pages will join running Tx again */
+			if (ext4_should_journal_plus(mpd->inode) &&
+				PageChecked(page)) {
+				unlock_page(page);
+				continue;
+			}
+
 			wait_on_page_writeback(page);
 			BUG_ON(PageWriteback(page));
 
@@ -3039,16 +3066,6 @@ static int ext4jp_do_writepages(struct mpage_da_data *mpd)
 	if (!mapping->nrpages || !mapping_tagged(mapping, PAGECACHE_TAG_DIRTY))
 		goto out_writepages;
 
-	/* (Jaehwan) We have to consider writeback with committed data
-	 *  Need to check comment below codes make any problems */
-
-	// if (ext4_should_journal_data(inode)) {
-	// 	blk_start_plug(&plug);
-	// 	ret = write_cache_pages(mapping, wbc, ext4_writepage_cb, NULL);
-	// 	blk_finish_plug(&plug);
-	// 	goto out_writepages;
-	// }
-
 	/*
 	 * If the filesystem has aborted, it is read-only, so return
 	 * right away instead of dumping stack traces later on that
@@ -3065,23 +3082,7 @@ static int ext4jp_do_writepages(struct mpage_da_data *mpd)
 		goto out_writepages;
 	}
 
-	/*
-	 * If we have inline data and arrive here, it means that
-	 * we will soon create the block for the 1st page, so
-	 * we'd better clear the inline data here.
-	 */
-	if (ext4_has_inline_data(inode)) {
-		BUG(); // Not implemented yet
-		handle = ext4_journal_start(inode, EXT4_HT_INODE, 1);
-		if (IS_ERR(handle)) {
-			ret = PTR_ERR(handle);
-			goto out_writepages;
-		}
-		BUG_ON(ext4_test_inode_state(inode,
-				EXT4_STATE_MAY_INLINE_DATA));
-		ext4_destroy_inline_data(handle, inode);
-		ext4_journal_stop(handle);
-	}
+	BUG_ON(ext4_has_inline_data(inode)); // Not implemented yet
 
 	if (ext4_should_dioread_nolock(inode)) {
 		BUG(); // Not implemented yet
