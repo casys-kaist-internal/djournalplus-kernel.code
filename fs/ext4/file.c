@@ -366,7 +366,7 @@ static ssize_t ext4jp_buffered_write_iter(struct kiocb *iocb,
 	struct page **pages;
 	handle_t *handle = NULL;
 	ssize_t ret;
-	int needed_blocks, nr_blks, nr_append;
+	int needed_blocks, nr_blks, nr_append = 0;
 	unsigned int block_size;
 
 	/* Total data blocks */
@@ -374,7 +374,8 @@ static ssize_t ext4jp_buffered_write_iter(struct kiocb *iocb,
 	nr_blks = (from->count + block_size - 1) / block_size;
 
 	/* How many blocks to be appended (for dealloc) */
-	nr_append = ext4jp_count_nr_append(inode, iocb->ki_pos, from->count);
+	if (test_opt(inode->i_sb, DELALLOC))
+		nr_append = ext4jp_count_nr_append(inode, iocb->ki_pos, from->count);
 	if (nr_append < 0) {
 		pr_err("ext4jp_count_nr_append failed (%d).\n", nr_append);
 		return nr_append;
@@ -387,6 +388,7 @@ static ssize_t ext4jp_buffered_write_iter(struct kiocb *iocb,
 		return -ENOMEM;
 
 	needed_blocks = ext4jp_writepage_trans_blocks(inode, from->count);
+	needed_blocks += (nr_blks - 1) * 2;
 	needed_blocks += (nr_blks - nr_append);
 
 	handle = ext4_journal_start(inode, EXT4_HT_WRITE_PAGE, needed_blocks);

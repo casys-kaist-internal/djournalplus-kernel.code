@@ -1360,7 +1360,11 @@ static int ext4jp_write_begin(struct file *file, struct address_space *mapping,
 	BUG_ON(!page || PageWriteback(page));
 
 	// TODO: change to delayed allocation enabled selective journaling
-	ret = __block_write_begin(page, pos, len, ext4_da_get_block_prep);
+	if (test_opt(inode->i_sb, DELALLOC))
+		ret = __block_write_begin(page, pos, len, ext4_da_get_block_prep);
+	else
+		ret = __block_write_begin(page, pos, len, ext4_get_block);
+
 	if (!ret) {
 		ret = ext4_walk_page_buffers(journal_current_handle(), inode,
 					     page_buffers(page), from, to, NULL,
@@ -3274,7 +3278,7 @@ static int ext4_do_writepages(struct mpage_da_data *mpd)
 	if (!mapping->nrpages || !mapping_tagged(mapping, PAGECACHE_TAG_DIRTY))
 		goto out_writepages;
 
-	if (ext4_should_journal_data(inode)) {
+	if (ext4_should_journal_data(inode) || ext4_should_journal_plus(inode)) {
 		blk_start_plug(&plug);
 		ret = write_cache_pages(mapping, wbc, ext4_writepage_cb, NULL);
 		blk_finish_plug(&plug);
@@ -3384,7 +3388,7 @@ retry:
 		 * try to write out the rest of the page. Journalled mode is
 		 * not supported by delalloc.
 		 */
-		BUG_ON(ext4_should_journal_data(inode));
+		BUG_ON(ext4_should_journal_data(inode) || ext4_should_journal_plus(inode));
 		needed_blocks = ext4_da_writepages_trans_blocks(inode);
 
 		/* start a new transaction */
@@ -3494,7 +3498,10 @@ static int ext4jp_writepages(struct address_space *mapping,
 		return -EIO;
 
 	percpu_down_read(&EXT4_SB(sb)->s_writepages_rwsem);
-	ret = ext4jp_do_writepages(&mpd);
+	if (test_opt(mapping->host->i_sb, DELALLOC))
+		ret = ext4jp_do_writepages(&mpd);
+	else
+		ret = ext4_do_writepages(&mpd);
 	percpu_up_read(&EXT4_SB(sb)->s_writepages_rwsem);
 
 	return ret;
