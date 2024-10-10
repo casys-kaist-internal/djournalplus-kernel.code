@@ -749,7 +749,7 @@ static void stop_this_handle(handle_t *handle)
 	if (handle->h_rsv_handle)
 		__jbd2_journal_unreserve_handle(handle->h_rsv_handle,
 						transaction);
-#ifdef CONFIG_EXT4_DJPLUS
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
 	if (atomic_sub_return(1, &transaction->t_updates) <=
 			atomic_read(&transaction->t_dealloc_updates))
 #else
@@ -861,7 +861,7 @@ void jbd2_journal_wait_updates(journal_t *journal)
 
 		prepare_to_wait(&journal->j_wait_updates, &wait,
 				TASK_UNINTERRUPTIBLE);
-#ifdef CONFIG_EXT4_DJPLUS
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
 		if (atomic_read(&transaction->t_updates) <=
 				atomic_read(&transaction->t_dealloc_updates)) {
 			BUG_ON(atomic_read(&transaction->t_updates) !=
@@ -2088,25 +2088,14 @@ static void __jbd2_journal_temp_unlink_buffer(struct journal_head *jh)
 			struct inode *inode;
 
 			if (!bh->b_page->mapping || !bh->b_page->mapping->host) {
-				printk("[%llu] Not have page struct!! #### \n", bh->b_blocknr);
+				printk("[%llu] Unexpected case", bh->b_blocknr);
 				mark_buffer_dirty(bh);
 				return;
 			}
 
 			inode = bh->b_page->mapping->host;
-			if(S_ISBLK(inode->i_mode)) {
-				printk("[device %s] blk:%llu\n",
-							bh->b_bdev->bd_disk->disk_name, bh->b_blocknr);
-			} else {
-				// if (S_ISREG(inode->i_mode))
-				// 	printk("[%llu] is part of regular file (ino %lu)\n",
-				// 			bh->b_blocknr, inode->i_ino);
-				// else if (S_ISDIR(inode->i_mode))
-				// 	printk("[%llu] is part of directory file (ino %lu)\n",
-				// 			bh->b_blocknr, inode->i_ino);
-				// else
-				// 	printk("?mode %d bh[%llu] is part of directory file (ino %lu)\n",
-				// 			inode->i_mode, bh->b_blocknr, inode->i_ino);
+			if(!S_ISBLK(inode->i_mode)) {
+				BUG_ON(!(S_ISDIR(inode->i_mode) || S_ISREG(inode->i_mode)));
 				mark_buffer_dirty(bh);
 			}
 		}
@@ -2785,6 +2774,7 @@ int jbd2_journal_inode_ranged_wait(handle_t *handle, struct jbd2_inode *jinode,
 			start_byte, start_byte + length - 1);
 }
 
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
 int jbd2jp_journal_inode_pre_commit(handle_t *handle, struct jbd2_inode *jinode)
 {
 	transaction_t *transaction = handle->h_transaction;
@@ -2828,6 +2818,7 @@ int jbd2jp_journal_inode_pre_commit(handle_t *handle, struct jbd2_inode *jinode)
 
 	return 0;
 }
+#endif
 
 /*
  * File truncate and transaction commit interact with each other in a

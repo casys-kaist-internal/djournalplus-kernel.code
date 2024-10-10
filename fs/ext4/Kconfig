@@ -118,8 +118,8 @@ config EXT4_KUNIT_TESTS
 
 	  If unsure, say N.
 
-config EXT4_DJPLUS
-    bool "Enable enhanced data journaling mode"
+config EXT4_JP_ALLOC_ON_COMMIT
+    bool "Prevent data loss due to delayed allocation"
     depends on EXT4_FS
     default n
 

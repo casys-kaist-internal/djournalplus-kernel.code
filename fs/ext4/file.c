@@ -388,8 +388,7 @@ static ssize_t ext4jp_buffered_write_iter(struct kiocb *iocb,
 		return -ENOMEM;
 
 	needed_blocks = ext4jp_writepage_trans_blocks(inode, from->count);
-	needed_blocks += (nr_blks - 1) * 2;
-	needed_blocks += (nr_blks - nr_append);
+	needed_blocks += (nr_blks - 1) * 2 - nr_append;
 
 	handle = ext4_journal_start(inode, EXT4_HT_WRITE_PAGE, needed_blocks);
 	if (IS_ERR(handle))
@@ -399,11 +398,14 @@ static ssize_t ext4jp_buffered_write_iter(struct kiocb *iocb,
 	ret = ext4jp_perform_write(iocb, from, pages);
 	current->backing_dev_info = NULL;
 
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
 	if (nr_append) /* We did dealloc some block. */
 		ext4jp_alloc_on_commit_or_stop(handle, inode);
 	else /* We did not dealloc any block. */
 		ext4_journal_stop(handle);
+#endif
 
+	ext4_journal_stop(handle);
 	kfree(pages);
 	return ret;
 }

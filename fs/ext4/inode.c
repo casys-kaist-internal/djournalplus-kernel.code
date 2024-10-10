@@ -1084,7 +1084,10 @@ int jp_do_journal_get_write_access(handle_t *handle, struct inode *inode,
 		 * so add to running transacion's inode list
 		 * TODO: Implement alloc on commit
 		 */
-		// return ext4_jbd2_inode_add_write(handle, inode, page_offset(bh->b_page) + bh_offset(bh), bh->b_size);
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
+		return ext4_jbd2_inode_add_write(handle, inode,
+						page_offset(bh->b_page) + bh_offset(bh), bh->b_size);
+#endif
 		return 0;
 	}
 
@@ -2976,6 +2979,8 @@ static int mpage_prepare_extent_to_map(struct mpage_da_data *mpd)
 			/* Not writeback this pages will join running Tx again */
 			if (ext4_should_journal_plus(mpd->inode) &&
 				PageChecked(page)) {
+				ext4_msg(mpd->inode->i_sb, KERN_INFO, "Checked page(%lu) ino(%lu)",
+					page->index, mpd->inode->i_ino);
 				unlock_page(page);
 				continue;
 			}
@@ -3159,7 +3164,6 @@ retry:
 		 * try to write out the rest of the page. Journalled mode is
 		 * not supported by delalloc.
 		 */
-		// BUG_ON(ext4_should_journal_data(inode));
 		needed_blocks = ext4_da_writepages_trans_blocks(inode);
 
 		/* start a new transaction */
@@ -3688,6 +3692,41 @@ static int ext4_da_should_update_i_disksize(struct page *page,
 	return 1;
 }
 
+// Copied from generic_write_end function
+static int ext4jp_da_write_end(struct file *file, struct address_space *mapping,
+			loff_t pos, unsigned len, unsigned copied,
+			struct page *page, void *fsdata)
+{
+	struct inode *inode = mapping->host;
+	loff_t old_size = inode->i_size;
+	bool i_size_changed = false;
+
+	copied = block_write_end(file, mapping, pos, len, copied, page, fsdata);
+
+	/*
+	 * No need to use i_size_read() here, the i_size cannot change under us
+	 * because we hold i_rwsem.
+	 *
+	 * But it's important to update i_size while still holding page lock:
+	 * page writeout could otherwise come in and zero beyond i_size.
+	 */
+	if (pos + copied > inode->i_size) {
+		i_size_write(inode, pos + copied);
+		i_size_changed = true;
+	}
+
+	ClearPageChecked(page);
+	unlock_page(page);
+	put_page(page);
+
+	if (old_size < pos)
+		pagecache_isize_extended(inode, old_size, pos);
+
+	if (i_size_changed)
+		mark_inode_dirty(inode);
+	return copied;
+}
+
 static int ext4_da_write_end(struct file *file,
 			     struct address_space *mapping,
 			     loff_t pos, unsigned len, unsigned copied,
@@ -3731,6 +3770,9 @@ static int ext4_da_write_end(struct file *file,
 	if (copied && new_i_size > inode->i_size &&
 	    ext4_da_should_update_i_disksize(page, end))
 		ext4_update_i_disksize(inode, new_i_size);
+
+	if (ext4_should_journal_plus(inode))
+		return ext4jp_da_write_end(file, mapping, pos, len, copied, page, fsdata);
 
 	return generic_write_end(file, mapping, pos, len, copied, page, fsdata);
 }

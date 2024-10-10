@@ -488,7 +488,7 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 
 	commit_transaction->t_state = T_SWITCH;
 
-#ifdef CONFIG_EXT4_DJPLUS
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
 	if (journal->j_pre_commit_callback)
 		journal->j_pre_commit_callback(journal, commit_transaction);
 
@@ -1186,6 +1186,9 @@ restart_loop:
 	wake_up(&journal->j_wait_done_commit);
 	wake_up(&journal->j_fc_wait);
 
+	printk("Left blocks in journal %lu/%d  (%lu%%)\n", jbd2_log_space_left(journal),
+				journal->j_total_len,
+				(jbd2_log_space_left(journal)/journal->j_total_len) * 100);
 	/*
 	 * Calculate overall stats
 	 */

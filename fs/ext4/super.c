@@ -519,6 +519,7 @@ out:
 	return AOP_WRITEPAGE_ACTIVATE;
 }
 
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
 static void ext4jp_alloc_on_commit_callback(journal_t *journal, transaction_t *transaction)
 {
 	struct jbd2_inode *jinode, *next_j;
@@ -537,6 +538,7 @@ static void ext4jp_alloc_on_commit_callback(journal_t *journal, transaction_t *t
 		list_del(&jinode->i_jp_list);
 	}
 }
+#endif
 
 static int ext4_journalled_submit_inode_data_buffers(struct jbd2_inode *jinode)
 {
@@ -5495,7 +5497,7 @@ static int __ext4_fill_super(struct fs_context *fc, struct super_block *sb)
 		sbi->s_journal->j_commit_callback =
 			ext4_journal_commit_callback;
 
-#ifdef CONFIG_EXT4_DJPLUS
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
 	if (test_opt(sb, JOURNAL_DATA))
 		sbi->s_journal->j_pre_commit_callback = ext4jp_alloc_on_commit_callback;
 #endif

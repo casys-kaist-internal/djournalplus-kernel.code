@@ -453,7 +453,7 @@ struct jbd2_inode {
 	 */
 	loff_t i_dirty_end;
 
-#ifdef CONFIG_EXT4_DJPLUS
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
 	struct list_head	i_jp_list;
 	handle_t		*i_handle;
 #endif
