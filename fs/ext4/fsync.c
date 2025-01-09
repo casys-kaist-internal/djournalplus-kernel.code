@@ -148,6 +148,25 @@ int ext4_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 		goto out;
 	}
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	/* tau-journal do not writeback data block on fsync
+	 * we only do commit the current transaction
+	 *
+	 * Note: data journal mode do checkpoint before commit transaction
+	 *       it may arise additional I/O, may related to linux WB policy */
+	if (ext4_should_journal_plus(inode)) {
+		BUG_ON(!sbi->s_journal);
+		ret = ext4_force_commit(inode->i_sb);
+
+		if (needs_barrier) {
+			err = blkdev_issue_flush(inode->i_sb->s_bdev);
+			if (!ret)
+				ret = err;
+		}
+		goto out;
+	}
+#endif
+
 	ret = file_write_and_wait_range(file, start, end);
 	if (ret)
 		goto out;
@@ -169,8 +188,6 @@ int ext4_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 	if (!sbi->s_journal)
 		ret = ext4_fsync_nojournal(inode, datasync, &needs_barrier);
 	else if (ext4_should_journal_data(inode))
-		ret = ext4_force_commit(inode->i_sb);
-	else if (ext4_should_journal_plus(inode))
 		ret = ext4_force_commit(inode->i_sb);
 	else
 		ret = ext4_fsync_journal(inode, datasync, &needs_barrier);

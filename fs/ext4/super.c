@@ -58,6 +58,9 @@
 #include "mballoc.h"
 #include "fsmap.h"
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+#include "tau_journal.h"
+#endif
 #define CREATE_TRACE_POINTS
 #include <trace/events/ext4.h>
 
@@ -1372,6 +1375,9 @@ static struct inode *ext4_alloc_inode(struct super_block *sb)
 	INIT_WORK(&ei->i_rsv_conversion_work, ext4_end_io_rsv_work);
 	ext4_fc_init_inode(&ei->vfs_inode);
 	mutex_init(&ei->i_fc_lock);
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	tjournal_init_inode(&ei->vfs_inode);
+#endif
 	return &ei->vfs_inode;
 }
 
@@ -1424,6 +1430,9 @@ static void init_once(void *foo)
 	init_rwsem(&ei->i_data_sem);
 	inode_init_once(&ei->vfs_inode);
 	ext4_fc_init_inode(&ei->vfs_inode);
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	tjournal_init_inode(&ei->vfs_inode);
+#endif
 }
 
 static int __init init_inodecache(void)
@@ -1613,10 +1622,12 @@ enum {
 	Opt_max_dir_size_kb, Opt_nojournal_checksum, Opt_nombcache,
 	Opt_no_prefetch_block_bitmaps, Opt_mb_optimize_scan,
 	Opt_errors, Opt_data, Opt_data_err, Opt_jqfmt, Opt_dax_type,
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	Opt_data_journal_plus, // data journal plus mode
+#endif
 #ifdef CONFIG_EXT4_DEBUG
 	Opt_fc_debug_max_replay, Opt_fc_debug_force
 #endif
-	Opt_data_journal_plus
 };
 
 static const struct constant_table ext4_param_errors[] = {
@@ -1694,7 +1705,9 @@ static const struct fs_parameter_spec ext4_param_specs[] = {
 	fsparam_flag	("nojournal_checksum",	Opt_nojournal_checksum),
 	fsparam_flag	("journal_async_commit",Opt_journal_async_commit),
 	fsparam_flag	("abort",		Opt_abort),
+#ifdef CONFIG_EXT4_TAU_JOURNALING
 	fsparam_flag	("data_journal_plus",	Opt_data_journal_plus),
+#endif
 	fsparam_enum	("data",		Opt_data, ext4_param_data),
 	fsparam_enum	("data_err",		Opt_data_err,
 						ext4_param_data_err),
@@ -1854,8 +1867,10 @@ static const struct mount_opts {
 	{Opt_fc_debug_force, EXT4_MOUNT2_JOURNAL_FAST_COMMIT,
 	 MOPT_SET | MOPT_2 | MOPT_EXT4_ONLY},
 #endif
+#ifdef CONFIG_EXT4_TAU_JOURNALING
 	{Opt_data_journal_plus, EXT4_MOUNT2_JOURNAL_PLUS,
 		MOPT_SET | MOPT_2 | MOPT_EXT4_ONLY},
+#endif
 	{Opt_err, 0, 0}
 };
 
@@ -4878,11 +4893,16 @@ static int ext4_load_and_init_journal(struct super_block *sb,
 		 */
 		if (jbd2_journal_check_available_features
 		    (sbi->s_journal, 0, 0, JBD2_FEATURE_INCOMPAT_REVOKE)) {
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+			/* If you want to use ordered mode in tau-journaling.
+			 * Mounting with data-journal mode & tau-journaling mode.
+			 * You can give different option to application (TODO) */
 			if (test_opt2(sb, JOURNAL_PLUS)) {
-				ext4_msg(sb, KERN_ERR, "Journal Plus does not support "
-					"ORDERED(default) mode");
+				ext4_msg(sb, KERN_ERR, "TAU Journaling does not support "
+					"mounting with ORDERED mode");
 				goto out;
 			}
+#endif
 			set_opt(sb, ORDERED_DATA);
 			sbi->s_def_mount_opt |= EXT4_MOUNT_ORDERED_DATA;
 		} else {
@@ -4893,11 +4913,13 @@ static int ext4_load_and_init_journal(struct super_block *sb,
 
 	case EXT4_MOUNT_ORDERED_DATA:
 	case EXT4_MOUNT_WRITEBACK_DATA:
+#ifdef CONFIG_EXT4_TAU_JOURNALING
 		if (test_opt2(sb, JOURNAL_PLUS)) {
-			ext4_msg(sb, KERN_ERR, "Journal Plus does not support "
-			       "ORDERED/WRITEBACK mode");
+			ext4_msg(sb, KERN_ERR, "TAU Journaling does not support "
+			       "mouting with ORDERED/WRITEBACK mode");
 			goto out;
 		}
+#endif
 		if (!jbd2_journal_check_available_features
 		    (sbi->s_journal, 0, 0, JBD2_FEATURE_INCOMPAT_REVOKE)) {
 			ext4_msg(sb, KERN_ERR, "Journal does not support "
@@ -5702,10 +5724,14 @@ static int ext4_fill_super(struct super_block *sb, struct fs_context *fc)
 
 	if (sbi->s_journal) {
 		if (test_opt(sb, DATA_FLAGS) == EXT4_MOUNT_JOURNAL_DATA)
+#ifdef CONFIG_EXT4_TAU_JOURNALING
 			if (test_opt2(sb, JOURNAL_PLUS))
-				descr = " journalled data plus mode (DJPLUS)";
+				descr = " TAU-journalling mode";
 			else
 				descr = " journalled data mode";
+#else
+			descr = " journalled data mode";
+#endif
 		else if (test_opt(sb, DATA_FLAGS) == EXT4_MOUNT_ORDERED_DATA)
 			descr = " ordered data mode";
 		else
@@ -6019,10 +6045,18 @@ static int ext4_load_journal(struct super_block *sb,
 		ext4_commit_super(sb);
 	}
 
-	if(test_opt2(sb, JOURNAL_PLUS)) {
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	/* If mount with tau-journaling, mark it and start its own checkpoint daemon */
+	if (test_opt2(sb, JOURNAL_PLUS)) {
 		journal->j_flags |= JBD2_EXT4_JOURNAL_PLUS;
-		ext4_msg(sb, KERN_INFO, "Set jbd2 journal plus mode");
+		err = tjournal_start_thread(journal);
+		if (err) {
+			ext4_msg(sb, KERN_ERR, "Failed to start tau journal daemon");
+			goto err_out;
+		} else
+			ext4_msg(sb, KERN_INFO, "Set jbd2 journal plus mode");
 	}
+#endif
 
 	return 0;
 
@@ -6457,12 +6491,14 @@ static int __ext4_remount(struct fs_context *fc, struct super_block *sb)
 			err = -EINVAL;
 			goto restore_opts;
 		}
+#ifdef CONFIG_EXT4_TAU_JOURNALING
 		if (test_opt2(sb, JOURNAL_PLUS)) {
 			ext4_msg(sb, KERN_ERR, "can't mount with "
 				"data_journal_plus in data=ordered mode");
 			err = -EINVAL;
 			goto restore_opts;
 		}
+#endif
 	}
 
 	if ((sbi->s_mount_opt ^ old_opts.s_mount_opt) & EXT4_MOUNT_NO_MBCACHE) {

@@ -466,14 +466,16 @@ int ext4_force_commit(struct super_block *sb);
 #define EXT4_INODE_JOURNAL_DATA_MODE	0x01 /* journal data mode */
 #define EXT4_INODE_ORDERED_DATA_MODE	0x02 /* ordered data mode */
 #define EXT4_INODE_WRITEBACK_DATA_MODE	0x04 /* writeback data mode */
-#define EXT4_INODE_JOURNAL_PLUS_MODE	0x08 /* data journal plus mode */
 
 int ext4_inode_journal_mode(struct inode *inode);
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+#define EXT4_INODE_JOURNAL_PLUS_MODE	0x08 /* data journal plus mode */
 static inline int ext4_should_journal_plus(struct inode *inode)
 {
 	return ext4_inode_journal_mode(inode) & EXT4_INODE_JOURNAL_PLUS_MODE;
 }
+#endif
 
 static inline int ext4_should_journal_data(struct inode *inode)
 {

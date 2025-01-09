@@ -269,6 +269,8 @@ static ssize_t ext4_write_checks(struct kiocb *iocb, struct iov_iter *from)
 	return count;
 }
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+/* based on generic_perform_write() */
 static ssize_t ext4jp_perform_write(struct kiocb *iocb, struct iov_iter *i,
 										struct page **pages)
 {
@@ -366,29 +368,20 @@ static ssize_t ext4jp_buffered_write_iter(struct kiocb *iocb,
 	struct page **pages;
 	handle_t *handle = NULL;
 	ssize_t ret;
-	int needed_blocks, nr_blks, nr_append = 0;
+	int needed_blocks, nr_blks;
 	unsigned int block_size;
 
 	/* Total data blocks */
 	block_size =  1 << inode->i_sb->s_blocksize_bits;
 	nr_blks = (from->count + block_size - 1) / block_size;
 
-	/* How many blocks to be appended (for dealloc) */
-	if (test_opt(inode->i_sb, DELALLOC))
-		nr_append = ext4jp_count_nr_append(inode, iocb->ki_pos, from->count);
-	if (nr_append < 0) {
-		pr_err("ext4jp_count_nr_append failed (%d).\n", nr_append);
-		return nr_append;
-	}
-	BUG_ON(nr_append > nr_blks);
-
-	/* Grab pages first in batch with locking */
+	/* Grab pages first in batch w/o locking */
 	pages = ext4jp_prepare_pages(inode, iocb, nr_blks);
 	if (!pages)
 		return -ENOMEM;
 
-	needed_blocks = ext4jp_writepage_trans_blocks(inode, from->count);
-	needed_blocks += (nr_blks - 1) * 2 - nr_append;
+	/* Data blocks + some metadata blocks */
+	needed_blocks = nr_blks +  EXT4_META_TRANS_BLOCKS(inode->i_sb);
 
 	handle = ext4_journal_start(inode, EXT4_HT_WRITE_PAGE, needed_blocks);
 	if (IS_ERR(handle))
@@ -409,6 +402,7 @@ static ssize_t ext4jp_buffered_write_iter(struct kiocb *iocb,
 	kfree(pages);
 	return ret;
 }
+#endif /* CONFIG_EXT4_TAU_JOURNALING */
 
 static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 					struct iov_iter *from)
@@ -424,10 +418,13 @@ static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 	if (ret <= 0)
 		goto out;
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	/* TODO: We need to separated tau-mode & normal mode */
 	if (ext4_should_journal_plus(inode)) {
 		ret = ext4jp_buffered_write_iter(iocb, from, inode);
 		goto out;
 	}
+#endif
 
 	current->backing_dev_info = inode_to_bdi(inode);
 	ret = generic_perform_write(iocb, from);

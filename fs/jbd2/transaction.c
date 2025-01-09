@@ -29,6 +29,10 @@
 #include <linux/sched/mm.h>
 
 #include <trace/events/jbd2.h>
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+#include "../ext4/ext4_jbd2.h"
+#include "../ext4/tau_journal.h"
+#endif
 
 static void __jbd2_journal_temp_unlink_buffer(struct journal_head *jh);
 static void __jbd2_journal_unfile_buffer(struct journal_head *jh);
@@ -303,6 +307,15 @@ __must_hold(&journal->j_state_lock)
 		return 1;
 	}
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	/* running out of journal area, wake up checkpoint worker */
+	if (journal->j_flags & JBD2_EXT4_JOURNAL_PLUS &&
+		 (jbd2_log_space_left(journal) / journal->j_total_len) <
+	    journal->j_checkpoint_threshold) {
+		pr_debug("wake up checkpointer\n");
+		wake_up(&journal->j_wait_checkpoint);
+	}
+#endif
 	/* No reservation? We are done... */
 	if (!rsv_blocks)
 		return 0;
@@ -2081,26 +2094,37 @@ static void __jbd2_journal_temp_unlink_buffer(struct journal_head *jh)
 	if (transaction && is_journal_aborted(transaction->t_journal))
 		clear_buffer_jbddirty(bh);
 	else if (test_clear_buffer_jbddirty(bh)) {
-		/* Expose only file data to the VM
-		 * Prevent contention on writeback of filesystem metadata block
-		 * Additionally, they are not predictable on write operation */
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+		/* We don't need to do already journalled */
+		if (buffer_taudirty(bh))
+			return;
+		/* Mount with tau-journaling mode, handle for different journal mode */
 		if (transaction->t_journal->j_flags & JBD2_EXT4_JOURNAL_PLUS) {
+			struct page *page = bh->b_page;
+			struct address_space *mapping = page->mapping;
 			struct inode *inode;
 
-			if (!bh->b_page->mapping || !bh->b_page->mapping->host) {
-				printk("[%llu] Unexpected case", bh->b_blocknr);
-				mark_buffer_dirty(bh);
+			BUG_ON(!mapping);
+			inode = mapping->host;
+			/* Filesystem's metadata (superblock, bitmap and etc ...) */
+			if (S_ISBLK(inode->i_mode)) {
+				set_buffer_taudirty(bh);
 				return;
 			}
-
-			inode = bh->b_page->mapping->host;
-			if(!S_ISBLK(inode->i_mode)) {
-				BUG_ON(!(S_ISDIR(inode->i_mode) || S_ISREG(inode->i_mode)));
+			/* Since we are using dual-mode journaling, should handle differently */
+			if (!ext4_should_journal_plus(inode))
 				mark_buffer_dirty(bh);
+			else {
+				/* This buffer is not allocated yet */
+				if (buffer_delay(bh))
+					insert_da_journalled(inode, page->index);
+				set_buffer_taudirty(bh);
 			}
-		}
-		else
-			mark_buffer_dirty(bh);	/* Expose it to the VM */
+		} else
+			mark_buffer_dirty(bh);	/* Other journaling mode */
+#else
+		mark_buffer_dirty(bh);	/* Expose it to the VM */
+#endif
 	}
 }
 
@@ -2146,6 +2170,13 @@ __journal_try_to_free_buffer(journal_t *journal, struct buffer_head *bh)
 
 	jh = bh2jh(bh);
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	// delayed buffer should be handled before freeing
+	if (buffer_delay(bh)) {
+		BUG_ON(!(journal->j_flags & JBD2_EXT4_JOURNAL_PLUS));
+		goto out;
+	}
+#endif
 	if (buffer_locked(bh) || buffer_dirty(bh))
 		goto out;
 
@@ -2373,6 +2404,14 @@ static int journal_unmap_buffer(journal_t *journal, struct buffer_head *bh,
 			goto zap_buffer;
 		}
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+		/* Note: this function called during handling umount filesystem
+		*       we cannot wake tjournald to do checkpoint since thie thread
+		*       hold all folios lock (hard to unlock at this function)
+		*       So, if there exist some blocks in this code, that might be a bug */
+		if (journal->j_flags & JBD2_EXT4_JOURNAL_PLUS)
+			BUG_ON(buffer_delay(bh));
+#endif
 		if (!buffer_dirty(bh)) {
 			/* bdflush has written it.  We can drop it now */
 			__jbd2_journal_remove_checkpoint(jh);
@@ -2410,6 +2449,10 @@ static int journal_unmap_buffer(journal_t *journal, struct buffer_head *bh,
 			}
 		}
 	} else if (transaction == journal->j_committing_transaction) {
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+		if (journal->j_flags & JBD2_EXT4_JOURNAL_PLUS)
+			pr_warn("Transaction committing at here?\n");
+#endif
 		JBUFFER_TRACE(jh, "on committing transaction");
 		/*
 		 * The buffer is committing, we simply cannot touch
@@ -2440,6 +2483,10 @@ static int journal_unmap_buffer(journal_t *journal, struct buffer_head *bh,
 		jbd2_journal_put_journal_head(jh);
 		return 0;
 	} else {
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+		if (journal->j_flags & JBD2_EXT4_JOURNAL_PLUS)
+			pr_warn("Transaction left?\n");
+#endif
 		/* Good, the buffer belongs to the running transaction.
 		 * We are writing our own transaction's data, not any
 		 * previous one's, so it is safe to throw it away
