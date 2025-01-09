@@ -160,7 +160,7 @@ restart:
 		jh = transaction->t_checkpoint_list;
 		bh = jh2bh(jh);
 
-		tjk_debug("chkpt target block: %llu\n",
+		tjk_debug("chkpt target block %llu\n",
 			  (unsigned long long)bh->b_blocknr);
 		if (buffer_locked(bh)) {
 			get_bh(bh);

@@ -4958,9 +4958,20 @@ out:
 static int ext4_journal_data_mode_check(struct super_block *sb)
 {
 	if (test_opt(sb, DATA_FLAGS) == EXT4_MOUNT_JOURNAL_DATA) {
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+		if (!test_opt2(sb, JOURNAL_PLUS)) {
+			printk_once(KERN_WARNING "EXT4-fs: Warning: mounting with "
+			    "data=journal disables delayed allocation, "
+			    "dioread_nolock, O_DIRECT and fast_commit support!\n");
+		} else
+			printk_once(KERN_WARNING "EXT4-fs: Warning: mounting with "
+			    "tau-journaling mode disables dioread_nolock, O_DIRECT "
+			    "and fast_commit support!\n");
+#else
 		printk_once(KERN_WARNING "EXT4-fs: Warning: mounting with "
 			    "data=journal disables delayed allocation, "
 			    "dioread_nolock, O_DIRECT and fast_commit support!\n");
+#endif
 		/* can't mount with both data=journal and dioread_nolock. */
 		clear_opt(sb, DIOREAD_NOLOCK);
 		clear_opt2(sb, JOURNAL_FAST_COMMIT);
@@ -6054,7 +6065,8 @@ static int ext4_load_journal(struct super_block *sb,
 			ext4_msg(sb, KERN_ERR, "Failed to start tau journal daemon");
 			goto err_out;
 		} else
-			ext4_msg(sb, KERN_INFO, "Set jbd2 journal plus mode");
+			ext4_msg(sb, KERN_INFO,
+				"TAU-journal mode enabled, tjournald started");
 	}
 #endif
 

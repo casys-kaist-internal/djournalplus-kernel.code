@@ -224,9 +224,8 @@ void ext4_evict_inode(struct inode *inode)
 			jbd2_complete_transaction(journal, commit_tid);
 			filemap_write_and_wait(&inode->i_data);
 		}
-		truncate_inode_pages_final(&inode->i_data);
-
 #ifdef CONFIG_EXT4_TAU_JOURNALING
+		/* Note that we have to do before truncate_inode_pages() */
 		if (inode->i_ino != EXT4_JOURNAL_INO &&
 		    ext4_should_journal_plus(inode) &&
 			S_ISREG(inode->i_mode) && inode->i_data.nrpages) {
@@ -248,6 +247,7 @@ void ext4_evict_inode(struct inode *inode)
 			tjk_debug("[DONE] inode(%lu) checkpoint\n",inode->i_ino);
 		}
 #endif
+		truncate_inode_pages_final(&inode->i_data);
 		goto no_delete;
 	}
 
