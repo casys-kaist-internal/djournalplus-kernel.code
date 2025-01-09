@@ -26,6 +26,9 @@
 #include <linux/bitops.h>
 #include <trace/events/jbd2.h>
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+#include "../ext4/tau_journal.h"
+#endif
 /*
  * IO end handler for temporary buffer_heads handling writes to the journal.
  */
@@ -347,6 +350,19 @@ static void write_tag_block(journal_t *j, journal_block_tag_t *tag,
 		tag->t_blocknr_high = cpu_to_be32((block >> 31) >> 1);
 }
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+static void write_da_tag_block(journal_t *j, journal_block_tag_da_t *tag,
+				   struct buffer_head *bh)
+{
+	struct page *page = bh->b_page;
+	pgoff_t pgidx = page->index;
+
+	tag->t_pgidx = cpu_to_be32(pgidx & (u32)~0);
+	if (jbd2_has_feature_64bit(j))
+		tag->t_pgidx_high = cpu_to_be32((pgidx >> 31) >> 1);
+}
+#endif
+
 static void jbd2_block_tag_csum_set(journal_t *j, journal_block_tag_t *tag,
 				    struct buffer_head *bh, __u32 sequence)
 {
@@ -407,6 +423,23 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 	int csum_size = 0;
 	LIST_HEAD(io_bufs);
 	LIST_HEAD(log_bufs);
+
+	/* Note: tag_bytes: 16bytes
+	 *       We can reuse temp buffer_head used for committin
+	 *       This is freed by free_buffer_head() */
+
+	/* Below code is for profiling journal commit operation */
+	// unsigned long temp;
+	// int profile_counter = 0;
+	// int profile_desc_counter = 0;
+	// unsigned long profile_desc_times = 0;
+	// int profile_io_counter = 0;
+	// unsigned long profile_io_times = 0;
+	// unsigned long loop_start;
+	// unsigned long loop_shot;
+	// unsigned long loop_point1 = 0;
+	// unsigned long loop_point2 = 0;
+	// unsigned long loop_point3 = 0;
 
 	if (jbd2_journal_has_csum_v2or3(journal))
 		csum_size = sizeof(struct jbd2_journal_block_tail);
@@ -486,8 +519,17 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 	// waits for any t_updates to finish
 	jbd2_journal_wait_updates(journal);
 
+	// jbd2_debug(3, "JBD2: Locked --> Switch \n");
+	// temp = jiffies;
+
 	commit_transaction->t_state = T_SWITCH;
 
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
+	if (journal->j_pre_commit_callback)
+		journal->j_pre_commit_callback(journal, commit_transaction);
+
+	J_ASSERT(!atomic_read(&commit_transaction->t_updates));
+#endif
 	J_ASSERT (atomic_read(&commit_transaction->t_outstanding_credits) <=
 			journal->j_max_transaction_buffers);
 
@@ -562,6 +604,10 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 	stats.run.rs_locked = jbd2_time_diff(stats.run.rs_locked,
 					     stats.run.rs_flushing);
 
+	// jbd2_debug(3, "Switched phase %lu(us) ||  %lu(ms).\n",
+	// 		jiffies_to_usecs(jbd2_time_diff(temp, stats.run.rs_flushing)),
+	// 		jiffies_to_msecs(jbd2_time_diff(temp, stats.run.rs_flushing)));
+
 	commit_transaction->t_state = T_FLUSH;
 	journal->j_committing_transaction = commit_transaction;
 	journal->j_running_transaction = NULL;
@@ -609,6 +655,7 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 	descriptor = NULL;
 	while (commit_transaction->t_buffers) {
 
+		// profile_counter++;
 		/* Find the next buffer to be journaled... */
 
 		jh = commit_transaction->t_buffers;
@@ -637,6 +684,8 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 		   record the metadata buffer. */
 
 		if (!descriptor) {
+			// profile_desc_counter++;
+			// loop_start = jiffies;
 			J_ASSERT (bufs == 0);
 
 			jbd2_debug(4, "JBD2: get descriptor\n");
@@ -664,8 +713,11 @@ void jbd2_journal_commit_transaction(journal_t *journal)
                            completion later */
 			BUFFER_TRACE(descriptor, "ph3: file as descriptor");
 			jbd2_file_log_bh(&log_bufs, descriptor);
+			// loop_shot = jiffies;
+			// profile_desc_times += jbd2_time_diff(loop_start, loop_shot);
 		}
 
+		// loop_start = jiffies;
 		/* Where is the buffer to be written? */
 
 		err = jbd2_journal_next_log_block(journal, &blocknr);
@@ -677,6 +729,8 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 			continue;
 		}
 
+		// loop_shot = jiffies;
+		// loop_point1 += jbd2_time_diff(loop_start, loop_shot);
 		/*
 		 * start_this_handle() uses t_outstanding_credits to determine
 		 * the free space in the log.
@@ -700,6 +754,8 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 			jbd2_journal_abort(journal, flags);
 			continue;
 		}
+		// loop_shot = jiffies;
+		// loop_point2 += jbd2_time_diff(loop_start, loop_shot);
 		jbd2_file_log_bh(&io_bufs, wbuf[bufs]);
 
 		/* Record the new block's tag in the current descriptor
@@ -712,7 +768,17 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 			tag_flag |= JBD2_FLAG_SAME_UUID;
 
 		tag = (journal_block_tag_t *) tagp;
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+		/* Apply delayed allocation for data jounraling, leverage tag structure */
+		if (buffer_delay(jh2bh(jh))) {
+			tag_flag |= JBD2_FLAG_DELAYED;
+			write_da_tag_block(journal, (journal_block_tag_da_t *)tag,
+											jh2bh(jh));
+		} else
+			write_tag_block(journal, tag, jh2bh(jh)->b_blocknr);
+#else
 		write_tag_block(journal, tag, jh2bh(jh)->b_blocknr);
+#endif
 		tag->t_flags = cpu_to_be16(tag_flag);
 		jbd2_block_tag_csum_set(journal, tag, wbuf[bufs],
 					commit_transaction->t_tid);
@@ -727,6 +793,8 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 			first_tag = 0;
 		}
 
+		// loop_shot = jiffies;
+		// loop_point3 += jbd2_time_diff(loop_start, loop_shot);
 		/* If there's no more to do, or if the descriptor is full,
 		   let the IO rip! */
 
@@ -734,6 +802,8 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 		    commit_transaction->t_buffers == NULL ||
 		    space_left < tag_bytes + 16 + csum_size) {
 
+			// profile_io_counter++;
+			// loop_start = jiffies;
 			jbd2_debug(4, "JBD2: Submit %d IOs\n", bufs);
 
 			/* Write an end-of-descriptor marker before
@@ -755,7 +825,9 @@ start_journal_io:
 					crc32_sum =
 					    jbd2_checksum_data(crc32_sum, bh);
 				}
-
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+				tjc_debug("commit bh(%lld)\n", bh->b_blocknr);
+#endif
 				lock_buffer(bh);
 				clear_buffer_dirty(bh);
 				set_buffer_uptodate(bh);
@@ -768,8 +840,26 @@ start_journal_io:
                            time round the loop. */
 			descriptor = NULL;
 			bufs = 0;
+			// loop_shot = jiffies;
+			// profile_io_times += jbd2_time_diff(loop_start, loop_shot);
 		}
 	}
+
+	// jbd2_debug(3, "commit_loop %d, desc %d, io loop %d times each\n",
+	// 	profile_counter, profile_desc_counter, profile_io_counter);
+	// jbd2_debug(3, "desc making time %lums(%luus), io total time %lums(%luus)\n", 
+	// 		jiffies_to_msecs(profile_desc_times), jiffies_to_usecs(profile_desc_times),
+	// 		jiffies_to_msecs(profile_io_times), jiffies_to_usecs(profile_io_times));
+	// jbd2_debug(3, "CDF point 1(jbd2_journal_next_log_block) %lums(%luus)\n",
+	// 		jiffies_to_msecs(loop_point1), jiffies_to_usecs(loop_point1));
+	// jbd2_debug(3, "CDF point 2(jbd2_journal_write_metadata_buffer) %lums(%luus)\n",
+	// 		jiffies_to_msecs(loop_point2), jiffies_to_usecs(loop_point2));
+	// jbd2_debug(3, "CDF point 3(jbd2_file_log_bh) %lums(%luus)\n",
+	// 		jiffies_to_msecs(loop_point3), jiffies_to_usecs(loop_point3));
+	// temp = jiffies;
+	// jbd2_debug(3, "JBD2: commit phase 2 %lu(us) ||  %lu(ms).\n",
+	// 		jiffies_to_usecs(jbd2_time_diff(stats.run.rs_logging, temp)),
+	// 		jiffies_to_msecs(jbd2_time_diff(stats.run.rs_logging, temp)));
 
 	err = journal_finish_inode_data_buffers(journal, commit_transaction);
 	if (err) {
@@ -838,6 +928,10 @@ start_journal_io:
 
 	jbd2_debug(3, "JBD2: commit phase 3\n");
 
+	// temp = jiffies;
+	// jbd2_debug(3, "JBD2: commit phase 3 %lu(us) ||  %lu(ms).\n",
+	// 		jiffies_to_usecs(jbd2_time_diff(stats.run.rs_logging, temp)),
+	// 		jiffies_to_msecs(jbd2_time_diff(stats.run.rs_logging, temp)));
 	while (!list_empty(&io_bufs)) {
 		struct buffer_head *bh = list_entry(io_bufs.prev,
 						    struct buffer_head,
@@ -880,6 +974,10 @@ start_journal_io:
 	J_ASSERT (commit_transaction->t_shadow_list == NULL);
 
 	jbd2_debug(3, "JBD2: commit phase 4\n");
+	// temp = jiffies;
+	// jbd2_debug(3, "JBD2: commit phase 4 %lu(us) ||  %lu(ms).\n",
+	// 		jiffies_to_usecs(jbd2_time_diff(stats.run.rs_logging, temp)),
+	// 		jiffies_to_msecs(jbd2_time_diff(stats.run.rs_logging, temp)));
 
 	/* Here we wait for the revoke record and descriptor record buffers */
 	while (!list_empty(&log_bufs)) {
@@ -904,6 +1002,11 @@ start_journal_io:
 		jbd2_journal_abort(journal, err);
 
 	jbd2_debug(3, "JBD2: commit phase 5\n");
+	// temp = jiffies;
+	// jbd2_debug(3, "JBD2: commit phase 5 %lu(us) ||  %lu(ms).\n",
+	// 		jiffies_to_usecs(jbd2_time_diff(stats.run.rs_logging, temp)),
+	// 		jiffies_to_msecs(jbd2_time_diff(stats.run.rs_logging, temp)));
+
 	write_lock(&journal->j_state_lock);
 	J_ASSERT(commit_transaction->t_state == T_COMMIT_DFLUSH);
 	commit_transaction->t_state = T_COMMIT_JFLUSH;
@@ -943,6 +1046,10 @@ start_journal_io:
            before. */
 
 	jbd2_debug(3, "JBD2: commit phase 6\n");
+	// temp = jiffies;
+	// jbd2_debug(3, "JBD2: commit phase 6 %lu(us) ||  %lu(ms).\n",
+	// 		jiffies_to_usecs(jbd2_time_diff(stats.run.rs_logging, temp)),
+	// 		jiffies_to_msecs(jbd2_time_diff(stats.run.rs_logging, temp)));
 
 	J_ASSERT(list_empty(&commit_transaction->t_inode_list));
 	J_ASSERT(commit_transaction->t_buffers == NULL);
@@ -1024,6 +1131,8 @@ restart_loop:
 		 */
 		if (buffer_freed(bh) && !jh->b_next_transaction) {
 			struct address_space *mapping;
+
+			pr_info("freed? %lld\n", bh->b_blocknr);
 
 			clear_buffer_freed(bh);
 			clear_buffer_jbddirty(bh);
@@ -1120,6 +1229,10 @@ restart_loop:
 	/* Done with this transaction! */
 
 	jbd2_debug(3, "JBD2: commit phase 7\n");
+	// temp = jiffies;
+	// jbd2_debug(3, "JBD2: commit phase 7 %lu(us) ||  %lu(ms).\n",
+	// 		jiffies_to_usecs(jbd2_time_diff(stats.run.rs_logging, temp)),
+	// 		jiffies_to_msecs(jbd2_time_diff(stats.run.rs_logging, temp)));
 
 	J_ASSERT(commit_transaction->t_state == T_COMMIT_JFLUSH);
 
@@ -1180,6 +1293,15 @@ restart_loop:
 	wake_up(&journal->j_wait_done_commit);
 	wake_up(&journal->j_fc_wait);
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+    tjc_debug("Commit finish - TID: %u | Left: %lu blocks (%lu MB) | Used: %u blocks (%u KB) "
+           "| Total: %d blocks (%lu MB)\n\n",
+        commit_transaction->t_tid,
+        jbd2_log_space_left(journal), (jbd2_log_space_left(journal) * journal->j_blocksize) >> 20,
+        stats.run.rs_blocks + stats.run.rs_blocks_logged,
+		((stats.run.rs_blocks + stats.run.rs_blocks_logged) * journal->j_blocksize) >> 10,
+		journal->j_total_len, ((unsigned long)journal->j_total_len * journal->j_blocksize) >> 20);
+#endif
 	/*
 	 * Calculate overall stats
 	 */
@@ -1196,4 +1318,26 @@ restart_loop:
 	journal->j_stats.run.rs_blocks += stats.run.rs_blocks;
 	journal->j_stats.run.rs_blocks_logged += stats.run.rs_blocks_logged;
 	spin_unlock(&journal->j_history_lock);
+
+	// /* Log the updated stats using jbd2_debug */
+	// jbd2_debug(1, "Journal stats updated: ts_tid=%u, ts_requested=%llu\n",
+	// 	journal->j_stats.ts_tid, stats.ts_requested);
+	// jbd2_debug(1, "run.rs_wait=%u(ms) run.rs_request_delay=%u(ms), run.rs_running=%u(ms)\n",
+	// 	jiffies_to_msecs(stats.run.rs_wait), jiffies_to_msecs(stats.run.rs_request_delay),
+	// 	jiffies_to_msecs(stats.run.rs_running));
+	// jbd2_debug(1, "run.rs_wait=%u(us), run.rs_request_delay=%u(us), run.rs_running=%u(us)\n",
+	// 	jiffies_to_usecs(stats.run.rs_wait), jiffies_to_usecs(stats.run.rs_request_delay),
+	// 	jiffies_to_usecs(stats.run.rs_running));
+	// jbd2_debug(1, "run.rs_locked=%u(ms), run.rs_flushing=%u(ms), run.rs_logging=%u(ms)\n",
+	// 	jiffies_to_msecs(stats.run.rs_locked), jiffies_to_msecs(stats.run.rs_flushing),
+	// 	jiffies_to_msecs(stats.run.rs_logging));
+	// jbd2_debug(1, "run.rs_locked=%u(us), run.rs_flushing=%u(us), run.rs_logging=%u(us)n",
+	// 	jiffies_to_usecs(stats.run.rs_locked), jiffies_to_usecs(stats.run.rs_flushing),
+	// 	jiffies_to_usecs(stats.run.rs_logging));
+	// jbd2_debug(1, "run.rs_handle_count=%u, run.rs_blocks=%u, run.rs_blocks_logged=%u\n",
+	// 	stats.run.rs_handle_count, stats.run.rs_blocks, stats.run.rs_blocks_logged);
+	// jbd2_debug(1, "run.rs_blocks=%lu(KB), run.rs_blocks=%lu(MB)\n",
+	// 	(stats.run.rs_blocks * 4), (stats.run.rs_blocks * 4) >> 10);
+	// 		jbd2_debug(1, "run.rs_blocks_logged=%lu(KB), run.rs_blocks_logged=%lu(MB)\n",
+	// 	(stats.run.rs_blocks_logged * 4), (stats.run.rs_blocks_logged * 4) >> 10);
 }

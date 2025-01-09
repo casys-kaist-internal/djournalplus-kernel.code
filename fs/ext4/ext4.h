@@ -1014,6 +1014,24 @@ enum {
 	I_DATA_SEM_QUOTA,
 };
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+/*
+ * TAU-journaling mode, delayed allocation state for single file.
+ * It tracks journalled but not allocated pages.
+ *
+ */
+struct tjournal_da_node {
+    unsigned long start; /* start index of page */
+    unsigned int len;
+    struct tjournal_da_node *left;
+    struct tjournal_da_node *right;
+};
+
+struct tjournal_da_tree {
+    struct tjournal_da_node *root;
+    spinlock_t lock;
+};
+#endif
 
 /*
  * fourth extended file system inode data in memory
@@ -1079,6 +1097,9 @@ struct ext4_inode_info {
 	/* Protect concurrent accesses on i_fc_lblk_start, i_fc_lblk_len */
 	struct mutex i_fc_lock;
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	struct tjournal_da_tree i_journalled_da_tree;
+#endif
 	/*
 	 * i_disksize keeps track of what the inode size is ON DISK, not
 	 * in memory.  During truncate, i_size is set to the new size by
@@ -1267,7 +1288,9 @@ struct ext4_inode_info {
 #define EXT4_MOUNT2_MB_OPTIMIZE_SCAN	0x00000080 /* Optimize group
 						    * scanning in mballoc
 						    */
-
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+#define EXT4_MOUNT2_JOURNAL_PLUS 0x00000100 /* Data journal plus mode */
+#endif
 #define clear_opt(sb, opt)		EXT4_SB(sb)->s_mount_opt &= \
 						~EXT4_MOUNT_##opt
 #define set_opt(sb, opt)		EXT4_SB(sb)->s_mount_opt |= \
@@ -2959,6 +2982,10 @@ int ext4_walk_page_buffers(handle_t *handle,
 				     struct buffer_head *bh));
 int do_journal_get_write_access(handle_t *handle, struct inode *inode,
 				struct buffer_head *bh);
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+int ext4_tjournal_writepages(struct address_space *mapping,
+			   struct writeback_control *wbc);
+#endif
 #define FALL_BACK_TO_NONDELALLOC 1
 #define CONVERT_INLINE_DATA	 2
 
@@ -3850,6 +3877,28 @@ static inline int ext4_buffer_uptodate(struct buffer_head *bh)
 		set_buffer_uptodate(bh);
 	return buffer_uptodate(bh);
 }
+
+extern int ext4jp_writepage_trans_blocks(struct inode *inode, size_t cnt);
+extern int ext4jp_count_nr_append(struct inode *inode, loff_t pos, ssize_t len);
+extern struct page **ext4jp_prepare_pages(struct inode *, struct kiocb *, int nr);
+
+/* Print for debugging */
+#define jp_print(f, a...)						\
+	do {								\
+		printk(KERN_DEBUG "EXT4-DJPLUS (%s, %d): %s:",	\
+			__FILE__, __LINE__, __func__);			\
+		printk(KERN_DEBUG f, ## a);				\
+	} while (0)
+
+#ifdef CONFIG_EXT4_DJPLUS_DEBUG
+#define jp_debug(ino, fmt, ...)					\
+	pr_debug("[%s/%d] EXT4-DJPLUS (%s): ino %lu: (%s, %d): %s:" fmt,	\
+		 current->comm, task_pid_nr(current),			\
+		 ino->i_sb->s_id, ino->i_ino, __FILE__, __LINE__,	\
+		 __func__, ##__VA_ARGS__)
+#else
+#define jp_debug(ino, fmt, ...)	no_printk(fmt, ##__VA_ARGS__)
+#endif
 
 #endif	/* __KERNEL__ */
 

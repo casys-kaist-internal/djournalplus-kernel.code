@@ -330,6 +330,15 @@ static inline handle_t *__ext4_journal_start(struct inode *inode,
 #define ext4_journal_stop(handle) \
 	__ext4_journal_stop(__func__, __LINE__, (handle))
 
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
+static inline void ext4jp_alloc_on_commit_or_stop(handle_t *handle,
+						   struct inode *inode)
+{
+	BUG_ON(!ext4_handle_valid(handle));
+	jbd2jp_journal_inode_pre_commit(handle, EXT4_I(inode)->jinode);
+}
+#endif
+
 #define ext4_journal_start_reserved(handle, type) \
 	__ext4_journal_start_reserved((handle), __LINE__, (type))
 
@@ -460,6 +469,14 @@ int ext4_force_commit(struct super_block *sb);
 
 int ext4_inode_journal_mode(struct inode *inode);
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+#define EXT4_INODE_JOURNAL_PLUS_MODE	0x08 /* data journal plus mode */
+static inline int ext4_should_journal_plus(struct inode *inode)
+{
+	return ext4_inode_journal_mode(inode) & EXT4_INODE_JOURNAL_PLUS_MODE;
+}
+#endif
+
 static inline int ext4_should_journal_data(struct inode *inode)
 {
 	return ext4_inode_journal_mode(inode) & EXT4_INODE_JOURNAL_DATA_MODE;
@@ -507,6 +524,10 @@ static inline int ext4_should_dioread_nolock(struct inode *inode)
 		return 0;
 	if (ext4_should_journal_data(inode))
 		return 0;
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	if (ext4_should_journal_plus(inode))
+		return 0;
+#endif
 	/* temporary fix to prevent generic/422 test failures */
 	if (!test_opt(inode->i_sb, DELALLOC))
 		return 0;

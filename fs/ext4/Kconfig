@@ -117,3 +117,18 @@ config EXT4_KUNIT_TESTS
 	  to the KUnit documentation in Documentation/dev-tools/kunit/.
 
 	  If unsure, say N.
+
+config EXT4_TAU_JOURNALING
+    bool "TAU-Journaling mode supports"
+    depends on EXT4_FS
+    default y
+
+config EXT4_JP_ALLOC_ON_COMMIT
+    bool "Prevent data loss due to delayed allocation"
+    depends on EXT4_FS
+    default n
+
+config EXT4_DJPLUS_DEBUG
+    bool "EXT4_DJPLUS debugging support"
+    depends on EXT4_DJPLUS
+    default n

@@ -105,6 +105,16 @@ __releases(&journal->j_state_lock)
 	/* assert_spin_locked(&journal->j_state_lock); */
 
 	nblocks = journal->j_max_transaction_buffers;
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	if (journal->j_flags & JBD2_EXT4_JOURNAL_PLUS) {
+		pr_info("Call tjournald due to lack of journal space\n");
+		/* Is it possible that cannot wake up if no journal area? */
+		wake_up(&journal->j_wait_checkpoint);
+		wait_event(journal->j_wait_done_checkpoint,
+			 jbd2_log_space_left(journal) < nblocks);
+		return;
+	}
+#endif
 	while (jbd2_log_space_left(journal) < nblocks) {
 		write_unlock(&journal->j_state_lock);
 		mutex_lock_io(&journal->j_checkpoint_mutex);
@@ -203,6 +213,12 @@ int jbd2_log_do_checkpoint(journal_t *journal)
 	tid_t			this_tid;
 	int			result, batch_count = 0;
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	if (journal->j_flags & JBD2_EXT4_JOURNAL_PLUS) {
+		pr_warn("[%s] must not be called!",__func__);
+		return -EIO;
+	}
+#endif
 	jbd2_debug(1, "Start checkpoint\n");
 
 	/*

@@ -29,6 +29,10 @@
 #include <linux/sched/mm.h>
 
 #include <trace/events/jbd2.h>
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+#include "../ext4/ext4_jbd2.h"
+#include "../ext4/tau_journal.h"
+#endif
 
 static void __jbd2_journal_temp_unlink_buffer(struct journal_head *jh);
 static void __jbd2_journal_unfile_buffer(struct journal_head *jh);
@@ -115,6 +119,8 @@ static void jbd2_get_transaction(journal_t *journal,
 	atomic_set(&transaction->t_handle_count, 0);
 	INIT_LIST_HEAD(&transaction->t_inode_list);
 	INIT_LIST_HEAD(&transaction->t_private_list);
+	INIT_LIST_HEAD(&transaction->t_dealloc_list);
+	atomic_set(&transaction->t_dealloc_updates, 0);
 
 	/* Set up the commit timer for the new transaction. */
 	journal->j_commit_timer.expires = round_jiffies_up(transaction->t_expires);
@@ -301,6 +307,15 @@ __must_hold(&journal->j_state_lock)
 		return 1;
 	}
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	/* running out of journal area, wake up checkpoint worker */
+	if (journal->j_flags & JBD2_EXT4_JOURNAL_PLUS &&
+		 (jbd2_log_space_left(journal) / journal->j_total_len) <
+	    journal->j_checkpoint_threshold) {
+		pr_debug("wake up checkpointer\n");
+		wake_up(&journal->j_wait_checkpoint);
+	}
+#endif
 	/* No reservation? We are done... */
 	if (!rsv_blocks)
 		return 0;
@@ -747,7 +762,12 @@ static void stop_this_handle(handle_t *handle)
 	if (handle->h_rsv_handle)
 		__jbd2_journal_unreserve_handle(handle->h_rsv_handle,
 						transaction);
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
+	if (atomic_sub_return(1, &transaction->t_updates) <=
+			atomic_read(&transaction->t_dealloc_updates))
+#else
 	if (atomic_dec_and_test(&transaction->t_updates))
+#endif
 		wake_up(&journal->j_wait_updates);
 
 	rwsem_release(&journal->j_trans_commit_map, _THIS_IP_);
@@ -854,7 +874,14 @@ void jbd2_journal_wait_updates(journal_t *journal)
 
 		prepare_to_wait(&journal->j_wait_updates, &wait,
 				TASK_UNINTERRUPTIBLE);
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
+		if (atomic_read(&transaction->t_updates) <=
+				atomic_read(&transaction->t_dealloc_updates)) {
+			BUG_ON(atomic_read(&transaction->t_updates) !=
+					atomic_read(&transaction->t_dealloc_updates));
+#else
 		if (!atomic_read(&transaction->t_updates)) {
+#endif
 			finish_wait(&journal->j_wait_updates, &wait);
 			break;
 		}
@@ -2066,8 +2093,39 @@ static void __jbd2_journal_temp_unlink_buffer(struct journal_head *jh)
 	jh->b_jlist = BJ_None;
 	if (transaction && is_journal_aborted(transaction->t_journal))
 		clear_buffer_jbddirty(bh);
-	else if (test_clear_buffer_jbddirty(bh))
+	else if (test_clear_buffer_jbddirty(bh)) {
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+		/* We don't need to do already journalled */
+		if (buffer_taudirty(bh))
+			return;
+		/* Mount with tau-journaling mode, handle for different journal mode */
+		if (transaction->t_journal->j_flags & JBD2_EXT4_JOURNAL_PLUS) {
+			struct page *page = bh->b_page;
+			struct address_space *mapping = page->mapping;
+			struct inode *inode;
+
+			BUG_ON(!mapping);
+			inode = mapping->host;
+			/* Filesystem's metadata (superblock, bitmap and etc ...) */
+			if (S_ISBLK(inode->i_mode)) {
+				set_buffer_taudirty(bh);
+				return;
+			}
+			/* Since we are using dual-mode journaling, should handle differently */
+			if (!ext4_should_journal_plus(inode))
+				mark_buffer_dirty(bh);
+			else {
+				/* This buffer is not allocated yet */
+				if (buffer_delay(bh))
+					insert_da_journalled(inode, page->index);
+				set_buffer_taudirty(bh);
+			}
+		} else
+			mark_buffer_dirty(bh);	/* Other journaling mode */
+#else
 		mark_buffer_dirty(bh);	/* Expose it to the VM */
+#endif
+	}
 }
 
 /*
@@ -2112,6 +2170,13 @@ __journal_try_to_free_buffer(journal_t *journal, struct buffer_head *bh)
 
 	jh = bh2jh(bh);
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	// delayed buffer should be handled before freeing
+	if (buffer_delay(bh)) {
+		BUG_ON(!(journal->j_flags & JBD2_EXT4_JOURNAL_PLUS));
+		goto out;
+	}
+#endif
 	if (buffer_locked(bh) || buffer_dirty(bh))
 		goto out;
 
@@ -2339,6 +2404,14 @@ static int journal_unmap_buffer(journal_t *journal, struct buffer_head *bh,
 			goto zap_buffer;
 		}
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+		/* Note: this function called during handling umount filesystem
+		*       we cannot wake tjournald to do checkpoint since thie thread
+		*       hold all folios lock (hard to unlock at this function)
+		*       So, if there exist some blocks in this code, that might be a bug */
+		if (journal->j_flags & JBD2_EXT4_JOURNAL_PLUS)
+			BUG_ON(buffer_delay(bh));
+#endif
 		if (!buffer_dirty(bh)) {
 			/* bdflush has written it.  We can drop it now */
 			__jbd2_journal_remove_checkpoint(jh);
@@ -2376,6 +2449,10 @@ static int journal_unmap_buffer(journal_t *journal, struct buffer_head *bh,
 			}
 		}
 	} else if (transaction == journal->j_committing_transaction) {
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+		if (journal->j_flags & JBD2_EXT4_JOURNAL_PLUS)
+			pr_warn("Transaction committing at here?\n");
+#endif
 		JBUFFER_TRACE(jh, "on committing transaction");
 		/*
 		 * The buffer is committing, we simply cannot touch
@@ -2406,6 +2483,10 @@ static int journal_unmap_buffer(journal_t *journal, struct buffer_head *bh,
 		jbd2_journal_put_journal_head(jh);
 		return 0;
 	} else {
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+		if (journal->j_flags & JBD2_EXT4_JOURNAL_PLUS)
+			pr_warn("Transaction left?\n");
+#endif
 		/* Good, the buffer belongs to the running transaction.
 		 * We are writing our own transaction's data, not any
 		 * previous one's, so it is safe to throw it away
@@ -2739,6 +2820,52 @@ int jbd2_journal_inode_ranged_wait(handle_t *handle, struct jbd2_inode *jinode,
 	return jbd2_journal_file_inode(handle, jinode, JI_WAIT_DATA,
 			start_byte, start_byte + length - 1);
 }
+
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
+int jbd2jp_journal_inode_pre_commit(handle_t *handle, struct jbd2_inode *jinode)
+{
+	transaction_t *transaction = handle->h_transaction;
+	journal_t *journal = transaction->t_journal;
+	handle_t *ihandle;
+
+	/* Caller should hold inode lock */
+	if (jinode->i_handle) {
+		ihandle = jinode->i_handle;
+
+		BUG_ON(handle->h_ref != 1);
+		/* We don't expect there exists a rsv_handle */
+		BUG_ON(handle->h_rsv_handle);
+
+		// TODO: fine-grained calculation for credits
+		// ihandle->h_total_credits += handle->h_total_credits 
+		// 							- EXT4_META_TRANS_BLOCKS(jinode->i_vfs_inode->i_sb) - 1;
+		ihandle->h_total_credits += 1;
+		ihandle->h_revoke_credits_requested += handle->h_revoke_credits_requested;
+		ihandle->h_revoke_credits += handle->h_revoke_credits;
+
+		// handle->h_total_credits = EXT4_META_TRANS_BLOCKS(jinode->i_vfs_inode->i_sb) + 1;
+		handle->h_total_credits -= 1;
+		handle->h_revoke_credits_requested = 0;
+		handle->h_revoke_credits = 0;
+
+		return jbd2_journal_stop(handle);
+	}
+	/* TODO(junbongwe): We may need to hold fine grained lock to handle this list. */
+	write_lock(&journal->j_state_lock);
+	BUG_ON(jinode->i_handle);
+	BUG_ON(current->journal_info != handle);
+	current->journal_info = NULL;
+	jinode->i_handle = handle;
+
+	list_add(&jinode->i_jp_list, &transaction->t_dealloc_list);
+	if (atomic_read(&transaction->t_updates) <=
+			atomic_add_return(1, &transaction->t_dealloc_updates))
+		wake_up(&journal->j_wait_updates);
+	write_unlock(&journal->j_state_lock);
+
+	return 0;
+}
+#endif
 
 /*
  * File truncate and transaction commit interact with each other in a

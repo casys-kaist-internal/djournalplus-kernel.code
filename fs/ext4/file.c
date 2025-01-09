@@ -19,6 +19,8 @@
  *	(jj@sunsite.ms.mff.cuni.cz)
  */
 
+#include "linux/mm.h"
+#include "linux/pagemap.h"
 #include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/iomap.h>
@@ -267,6 +269,141 @@ static ssize_t ext4_write_checks(struct kiocb *iocb, struct iov_iter *from)
 	return count;
 }
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+/* based on generic_perform_write() */
+static ssize_t ext4jp_perform_write(struct kiocb *iocb, struct iov_iter *i,
+										struct page **pages)
+{
+	struct file *file = iocb->ki_filp;
+	loff_t pos = iocb->ki_pos;
+	struct address_space *mapping = file->f_mapping;
+	const struct address_space_operations *a_ops = mapping->a_ops;
+	long status = 0;
+	ssize_t written = 0;
+	int index = 0;
+
+	do {
+		struct page *page;
+		unsigned long offset;	/* Offset into pagecache page */
+		unsigned long bytes;	/* Bytes to write to page */
+		size_t copied;		/* Bytes copied from user */
+		void *fsdata = NULL;
+
+		offset = (pos & (PAGE_SIZE - 1));
+		bytes = min_t(unsigned long, PAGE_SIZE - offset,
+						iov_iter_count(i));
+
+again:
+		/*
+		 * Bring in the user page that we will copy from _first_.
+		 * Otherwise there's a nasty deadlock on copying from the
+		 * same page as we're writing to, without it being marked
+		 * up-to-date.
+		 */
+		if (unlikely(fault_in_iov_iter_readable(i, bytes) == bytes)) {
+			status = -EFAULT;
+			break;
+		}
+
+		if (fatal_signal_pending(current)) {
+			status = -EINTR;
+			break;
+		}
+
+		page = pages[index];
+		lock_page(page);
+
+		status = a_ops->write_begin(file, mapping, pos, bytes,
+						&page, &fsdata);
+		if (unlikely(status < 0)) {
+			unlock_page(page);
+			put_page(page);
+			break;
+		}
+
+		if (mapping_writably_mapped(mapping))
+			flush_dcache_page(page);
+
+		copied = copy_page_from_iter_atomic(page, offset, bytes, i);
+		flush_dcache_page(page);
+
+		status = a_ops->write_end(file, mapping, pos, bytes, copied,
+						page, fsdata);
+		if (unlikely(status != copied)) {
+			iov_iter_revert(i, copied - max(status, 0L));
+			if (unlikely(status < 0))
+				break;
+		}
+		cond_resched();
+
+		if (unlikely(status == 0)) {
+			/*
+			 * A short copy made ->write_end() reject the
+			 * thing entirely.  Might be memory poisoning
+			 * halfway through, might be a race with munmap,
+			 * might be severe memory pressure.
+			 */
+			if (copied)
+				bytes = copied;
+			goto again;
+		}
+		pos += status;
+		written += status;
+
+		balance_dirty_pages_ratelimited(mapping);
+		index++;
+	} while (iov_iter_count(i));
+
+	return written ? written : status;
+}
+
+/**
+ * @brief For multi-block atomic write, start handle outside perform_write
+ * 
+ * @note inode_lock is held by caller
+ */
+static ssize_t ext4jp_buffered_write_iter(struct kiocb *iocb,
+					struct iov_iter *from, struct inode *inode)
+{
+	struct page **pages;
+	handle_t *handle = NULL;
+	ssize_t ret;
+	int needed_blocks, nr_blks;
+	unsigned int block_size;
+
+	/* Total data blocks */
+	block_size =  1 << inode->i_sb->s_blocksize_bits;
+	nr_blks = (from->count + block_size - 1) / block_size;
+
+	/* Grab pages first in batch w/o locking */
+	pages = ext4jp_prepare_pages(inode, iocb, nr_blks);
+	if (!pages)
+		return -ENOMEM;
+
+	/* Data blocks + some metadata blocks */
+	needed_blocks = nr_blks +  EXT4_META_TRANS_BLOCKS(inode->i_sb);
+
+	handle = ext4_journal_start(inode, EXT4_HT_WRITE_PAGE, needed_blocks);
+	if (IS_ERR(handle))
+		return PTR_ERR(handle);
+
+	current->backing_dev_info = inode_to_bdi(inode);
+	ret = ext4jp_perform_write(iocb, from, pages);
+	current->backing_dev_info = NULL;
+
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
+	if (nr_append) /* We did dealloc some block. */
+		ext4jp_alloc_on_commit_or_stop(handle, inode);
+	else /* We did not dealloc any block. */
+		ext4_journal_stop(handle);
+#endif
+
+	ext4_journal_stop(handle);
+	kfree(pages);
+	return ret;
+}
+#endif /* CONFIG_EXT4_TAU_JOURNALING */
+
 static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 					struct iov_iter *from)
 {
@@ -280,6 +417,14 @@ static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 	ret = ext4_write_checks(iocb, from);
 	if (ret <= 0)
 		goto out;
+
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	/* TODO: We need to separated tau-mode & normal mode */
+	if (ext4_should_journal_plus(inode)) {
+		ret = ext4jp_buffered_write_iter(iocb, from, inode);
+		goto out;
+	}
+#endif
 
 	current->backing_dev_info = inode_to_bdi(inode);
 	ret = generic_perform_write(iocb, from);
