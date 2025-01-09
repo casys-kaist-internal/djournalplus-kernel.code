@@ -1,4 +1,6 @@
 #include "tau_journal.h"
+
+#ifdef CONFIG_EXT4_TAU_JOURNALING
 #include "ext4.h"
 #include "ext4_jbd2.h"
 #include "linux/buffer_head.h"
@@ -10,6 +12,8 @@
 #include <linux/kthread.h>
 #include <linux/freezer.h>
 #include "linux/writeback.h"
+
+
 
 void tjournal_init_inode(struct inode *inode)
 {
@@ -697,3 +701,4 @@ int truncate_da_journalled(struct inode *inode, pgoff_t start, unsigned int len)
 	struct ext4_inode_info *ei = EXT4_I(inode);
 	return __truncate_da_journalled(&ei->i_journalled_da_tree, start, len);
 }
+#endif /* CONFIG_EXT4_TAU_JOURNALING */

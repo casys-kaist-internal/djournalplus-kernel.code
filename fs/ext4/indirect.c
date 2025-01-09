@@ -868,8 +868,6 @@ static int ext4_clear_blocks(handle_t *handle, struct inode *inode,
 		flags |= EXT4_FREE_BLOCKS_FORGET | EXT4_FREE_BLOCKS_METADATA;
 	else if (ext4_should_journal_data(inode))
 		flags |= EXT4_FREE_BLOCKS_FORGET;
-	else if (ext4_should_journal_plus(inode))
-		flags |= EXT4_FREE_BLOCKS_FORGET;
 
 	if (!ext4_inode_block_valid(inode, block_to_free, count)) {
 		EXT4_ERROR_INODE(inode, "attempt to clear invalid "

@@ -2417,8 +2417,6 @@ static inline int get_default_free_blocks_flags(struct inode *inode)
 		return EXT4_FREE_BLOCKS_METADATA | EXT4_FREE_BLOCKS_FORGET;
 	else if (ext4_should_journal_data(inode))
 		return EXT4_FREE_BLOCKS_FORGET;
-	else if (ext4_should_journal_plus(inode))
-		return EXT4_FREE_BLOCKS_FORGET;
 	return 0;
 }
 
@@ -4529,7 +4527,7 @@ static long ext4_zero_range(struct file *file, loff_t offset,
 	trace_ext4_zero_range(inode, offset, len, mode);
 
 	/* Call ext4_force_commit to flush all data in case of data=journal. */
-	if (ext4_should_journal_data(inode) || ext4_should_journal_plus(inode)) {
+	if (ext4_should_journal_data(inode)) {
 		ret = ext4_force_commit(inode->i_sb);
 		if (ret)
 			return ret;
@@ -4636,7 +4634,7 @@ static long ext4_zero_range(struct file *file, loff_t offset,
 	 * blocks and update the inode
 	 */
 	credits = (2 * ext4_ext_index_trans_blocks(inode, 2)) + 1;
-	if (ext4_should_journal_data(inode) || ext4_should_journal_plus(inode))
+	if (ext4_should_journal_data(inode))
 		credits += 2;
 	handle = ext4_journal_start(inode, EXT4_HT_MISC, credits);
 	if (IS_ERR(handle)) {
@@ -5293,7 +5291,7 @@ static int ext4_collapse_range(struct file *file, loff_t offset, loff_t len)
 	punch_stop = (offset + len) >> EXT4_BLOCK_SIZE_BITS(sb);
 
 	/* Call ext4_force_commit to flush all data in case of data=journal. */
-	if (ext4_should_journal_data(inode) || ext4_should_journal_plus(inode)) {
+	if (ext4_should_journal_data(inode)) {
 		ret = ext4_force_commit(inode->i_sb);
 		if (ret)
 			return ret;
@@ -5446,7 +5444,7 @@ static int ext4_insert_range(struct file *file, loff_t offset, loff_t len)
 	len_lblk = len >> EXT4_BLOCK_SIZE_BITS(sb);
 
 	/* Call ext4_force_commit to flush all data in case of data=journal */
-	if (ext4_should_journal_data(inode) || ext4_should_journal_plus(inode)) {
+	if (ext4_should_journal_data(inode)) {
 		ret = ext4_force_commit(inode->i_sb);
 		if (ret)
 			return ret;

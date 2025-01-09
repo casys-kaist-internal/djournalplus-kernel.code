@@ -3065,6 +3065,7 @@ static int ext4_writepage_cb(struct page *page, struct writeback_control *wbc,
 	return ext4_writepage(page, wbc);
 }
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
 static int ext4jp_do_writepages(struct mpage_da_data *mpd)
 {
 	// (junbong): Copy from ext4_do_writepages
@@ -3263,6 +3264,7 @@ out_writepages:
 				     nr_to_write - wbc->nr_to_write);
 	return ret;
 }
+#endif /* CONFIG_EXT4_TAU_JOURNALING */
 
 static int ext4_do_writepages(struct mpage_da_data *mpd)
 {
@@ -4724,9 +4726,11 @@ void ext4_set_aops(struct inode *inode)
 	case EXT4_INODE_JOURNAL_DATA_MODE:
 		inode->i_mapping->a_ops = &ext4_journalled_aops;
 		return;
+#ifdef CONFIG_EXT4_TAU_JOURNALING
 	case EXT4_INODE_JOURNAL_PLUS_MODE:
 		inode->i_mapping->a_ops = &ext4_journalled_plus_aops;
 		return;
+#endif
 	default:
 		BUG();
 	}
