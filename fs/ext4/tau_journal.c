@@ -160,11 +160,11 @@ restart:
 		jh = transaction->t_checkpoint_list;
 		bh = jh2bh(jh);
 
-		tjk_debug("chkpt target block %llu\n",
-			  (unsigned long long)bh->b_blocknr);
+		tj_debug("checkpoint block(%d)\n", (int)bh->b_blocknr);
 		if (buffer_locked(bh)) {
 			get_bh(bh);
 			spin_unlock(&journal->j_list_lock);
+			tj_debug("wait on buffer\n");
 			wait_on_buffer(bh);
 			__brelse(bh);
 			goto retry;
@@ -175,20 +175,21 @@ restart:
 			get_bh(bh);
 			spin_unlock(&journal->j_list_lock);
 			BUG_ON(bh->b_page->mapping == NULL);
+			tj_debug("delayed block require allocation\n");
 			tjournal_writepages(bh->b_page->mapping);
-			BUG_ON(buffer_delay(bh));
 			// TODO: error handling
 			__brelse(bh);
 			goto retry;
 		}
 
-		// 해당 블록이 현재 러닝 트랜잭션에 포함된 경우
+		/* If this buffer involved in current transcation */
 		if (jh->b_transaction != NULL) {
 			transaction_t *t = jh->b_transaction;
 			tid_t tid = t->t_tid;
 
 			transaction->t_chp_stats.cs_forced_to_close++;
 			spin_unlock(&journal->j_list_lock);
+			tj_debug("wait on commit\n");
 
 			/* The journal thread is dead; so starting and waiting for a commit
 			 * to finish will cause us to wait for a _very_ long time. */
@@ -461,12 +462,12 @@ static struct tjournal_da_node *most_node(struct tjournal_da_node *node,
 
 static void __insert_da_node(struct tjournal_da_node *node, pgoff_t index)
 {
-	tjc_debug("node:%p, node start:%lu, node:len%d index: %lu\n", node,
-		  node->start, node->len, index);
+	// tjk_debug("node start(%lu) len(%d) page_index(%lu)\n",
+	// 	  node->start, node->len, index);
 
-	// 인덱스가 노드보다 작을경우
+	/* Index is smaller than this node */
 	if (index < node->start) {
-		// 노드에 병합.
+		/* Direct merge with left node */
 		if (index + 1 == node->start) {
 			struct tjournal_da_node *left = node->left;
 			node->start = index;
@@ -500,21 +501,20 @@ static void __insert_da_node(struct tjournal_da_node *node, pgoff_t index)
 				}
 			}
 		}
-		// 왼쪽 노드 생성
+		/* Make left node if not exist */
 		else if (!node->left)
 			node->left = create_da_node(index, 1);
 		else
 			__insert_da_node(node->left, index);
 	}
 
-	// 인덱스가 노드보다 큰 경우
-	if (index > node->start + node->len) {
-		// 노드에 병합
+	/* Index is bigger than this node */
+	if (index > node->start + node->len - 1) {
+		/* Direct merge with right node */
 		if (index == node->start + node->len) {
 			struct tjournal_da_node *right = node->right;
 			node->len++;
 
-			// 오른쪽 노드와 병합 가능 여부
 			if (right) {
 				if (right->left) {
 					struct tjournal_da_node *least, *prev;
@@ -541,7 +541,7 @@ static void __insert_da_node(struct tjournal_da_node *node, pgoff_t index)
 				}
 			}
 		}
-		// 오른쪽 노드 생성
+		/* Make right node if not exist */
 		else if (!node->right)
 			node->right = create_da_node(index, 1);
 		else
@@ -594,7 +594,7 @@ static int __lookup_da_journalled(struct tjournal_da_tree *tree, pgoff_t index,
 		return 0;
 
 	*len = node->start - index + node->len;
-	tjk_debug("index(%lu) len(%u) done\n", index, *len);
+	// tjk_debug("index(%lu) len(%u) done\n", index, *len);
 	return 1;
 }
 
@@ -669,14 +669,14 @@ static int __truncate_da_journalled(struct tjournal_da_tree *tree,
 	}
 
 	if (start == node->start) {
-		// 범위가 노드의 시작과 같음
+		/* start is same */
 		node->start = end;
 		node->len -= len;
 	} else if (end == node->start + node->len) {
-		// 범위가 노드의 끝과 같음
+		/* end is same*/
 		node->len -= len;
 	} else {
-		// 범위가 노드의 중간
+		/* in the middle of range */
 		struct tjournal_da_node *new_node;
 
 		new_node = create_da_node(end, node->start + node->len - end);
@@ -684,11 +684,9 @@ static int __truncate_da_journalled(struct tjournal_da_tree *tree,
 			ret = -ENOMEM;
 			goto unlock;
 		}
-		new_node->left =
-			node->right; // 기존 오른쪽 자식을 새 노드로 연결
-		node->right =
-			new_node; // 새 노드를 현재 노드의 오른쪽 자식으로 연결
-		node->len = start - node->start; // 현재 노드 길이 수정
+		new_node->left = node->right;
+		node->right = new_node;
+		node->len = start - node->start;
 	}
 
 unlock:

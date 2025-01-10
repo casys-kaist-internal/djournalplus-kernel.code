@@ -42,12 +42,12 @@ bool has_da_journalled(struct inode *inode);
 // #define TJOURNAL_COMMIT_DEBUG
 // #define TJOURNAL_HANDLE_DEBUG
 // #define TJOURNAL_DAEMON_DEBUG
-// #define TJOURNAL_CHECKPOINT_DEBUG
+#define TJOURNAL_CHECKPOINT_DEBUG
 
 #ifdef TJOURNAL_COMMIT_DEBUG
 #define tjc_debug(f, a...)                                           \
 	do {                                                         \
-		printk(KERN_INFO "%s (%s, %d):", __func__, __FILE__, \
+		printk(KERN_DEBUG "%s: (%s, %d)", __func__, __FILE__, \
 		       __LINE__);                                    \
 		printk(KERN_DEBUG "     ↳ " f, ##a);                 \
 	} while (0)
@@ -58,7 +58,7 @@ bool has_da_journalled(struct inode *inode);
 #ifdef TJOURNAL_HANDLE_DEBUG
 #define tjh_debug(f, a...)                                           \
 	do {                                                         \
-		printk(KERN_INFO "%s (%s, %d):", __func__, __FILE__, \
+		printk(KERN_DEBUG "%s: (%s, %d)", __func__, __FILE__, \
 		       __LINE__);                                    \
 		printk(KERN_DEBUG "     ↳ " f, ##a);                 \
 	} while (0)
@@ -69,7 +69,7 @@ bool has_da_journalled(struct inode *inode);
 #ifdef TJOURNAL_CHECKPOINT_DEBUG
 #define tjk_debug(f, a...)                                           \
 	do {                                                         \
-		printk(KERN_INFO "%s (%s, %d):", __func__, __FILE__, \
+		printk(KERN_DEBUG "%s: (%s, %d)", __func__, __FILE__, \
 		       __LINE__);                                    \
 		printk(KERN_DEBUG "     ↳ " f, ##a);                 \
 	} while (0)
@@ -80,7 +80,7 @@ bool has_da_journalled(struct inode *inode);
 #ifdef TJOURNAL_DAEMON_DEBUG
 #define tjd_debug(f, a...)                                           \
 	do {                                                         \
-		printk(KERN_INFO "%s (%s, %d):", __func__, __FILE__, \
+		printk(KERN_DEBUG "%s: (%s, %d)", __func__, __FILE__, \
 		       __LINE__);                                    \
 		printk(KERN_DEBUG "     ↳ " f, ##a);                 \
 	} while (0)
@@ -137,9 +137,14 @@ bool has_da_journalled(struct inode *inode);
 			pr_cont("TXHANDLE "); /* In running Tx */ \
 		pr_cont(" ] raw_ptr %p\n", page);                 \
 	} while (0)
+#define tj_debug(f, a...)                                           \
+	do {                                                         \
+		printk(KERN_DEBUG "     	↳ " f, ##a);                 \
+	} while (0)
 #else
 #define PRINT_INODE_INFO_COMPACT(inode) no_printk("%p\n", inode)
 #define PRINT_PAGE_FLAGS_COMPACT(page) no_printk("%p\n", page)
+#define tj_debug(fmt, ...) no_printk(fmt, ##__VA_ARGS__)
 #endif
 
 /**
