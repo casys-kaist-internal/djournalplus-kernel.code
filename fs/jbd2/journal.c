@@ -476,12 +476,6 @@ repeat:
 	set_buffer_shadow(bh_in);
 	spin_unlock(&jh_in->b_state_lock);
 
-#ifdef CONFIG_EXT4_TAU_JOURNALING
-	if (buffer_delay(bh_in))
-		tjh_debug("Delayed block committed at: %lld\n", blocknr);
-	else
-		tjh_debug("Block(%lld) committed at %lld\n", bh_in->b_blocknr, blocknr);
-#endif
 	return do_escape | (done_copy_out << 1);
 }
 

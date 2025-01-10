@@ -162,9 +162,9 @@ restart:
 
 		tj_debug("checkpoint block(%d)\n", (int)bh->b_blocknr);
 		if (buffer_locked(bh)) {
+			tj_debug("wait on buffer\n");
 			get_bh(bh);
 			spin_unlock(&journal->j_list_lock);
-			tj_debug("wait on buffer\n");
 			wait_on_buffer(bh);
 			__brelse(bh);
 			goto retry;
@@ -172,10 +172,10 @@ restart:
 
 		/* We need to allocate delayed data blocks here */
 		if (buffer_delay(bh)) {
+			tj_debug("delayed block require allocation\n");
 			get_bh(bh);
 			spin_unlock(&journal->j_list_lock);
 			BUG_ON(bh->b_page->mapping == NULL);
-			tj_debug("delayed block require allocation\n");
 			tjournal_writepages(bh->b_page->mapping);
 			// TODO: error handling
 			__brelse(bh);
@@ -218,6 +218,7 @@ restart:
 		}
 
 		if (!buffer_taudirty(bh)) {
+			tj_debug("not dirty remove it\n");
 			if (__jbd2_journal_remove_checkpoint(jh))
 				/* The transaction was released; we're done */
 				goto out;
@@ -225,6 +226,7 @@ restart:
 		} else
 			clear_buffer_taudirty(bh); /* Let's do writeback */
 
+		tj_debug("queing block(%d)\n", (int)bh->b_blocknr);
 		BUFFER_TRACE(bh, "queue");
 		get_bh(bh);
 		J_ASSERT_BH(bh, !buffer_jwrite(bh));
@@ -252,10 +254,12 @@ restart2:
 	    transaction->t_tid != this_tid)
 		goto out;
 
+	tj_debug("wait for checkpoint I/O being done\n");
 	while (transaction->t_checkpoint_io_list) {
 		jh = transaction->t_checkpoint_io_list;
 		bh = jh2bh(jh);
 		if (buffer_locked(bh)) {
+			tj_debug("wait for buffer(%d)\n", (int)bh->b_blocknr);
 			get_bh(bh);
 			spin_unlock(&journal->j_list_lock);
 			wait_on_buffer(bh);
@@ -278,7 +282,7 @@ restart2:
 out:
 	spin_unlock(&journal->j_list_lock);
 	result = jbd2_cleanup_journal_tail(journal);
-
+	tj_debug("return with(%d)\n", result);
 	return (result < 0) ? result : 0;
 }
 
@@ -288,7 +292,7 @@ static int tjournal_flush_all(journal_t *journal)
 	int err = 0;
 	transaction_t *transaction = NULL;
 
-	tjk_debug("start\n");
+	tjk_debug("start flushing all journal to disk\n");
 
 	write_lock(&journal->j_state_lock);
 
@@ -296,6 +300,8 @@ static int tjournal_flush_all(journal_t *journal)
 	if (journal->j_running_transaction) {
 		transaction = journal->j_running_transaction;
 		write_unlock(&journal->j_state_lock);
+		tj_debug("start commit running transaction(%d)\n",
+					transaction->t_tid);
 		jbd2_log_start_commit(journal, transaction->t_tid);
 		write_lock(&journal->j_state_lock);
 	} else if (journal->j_committing_transaction)
@@ -306,6 +312,7 @@ static int tjournal_flush_all(journal_t *journal)
 		tid_t tid = transaction->t_tid;
 
 		write_unlock(&journal->j_state_lock);
+		tj_debug("wait transaction(%d) being committed\n", tid);
 		jbd2_log_wait_commit(journal, tid);
 	} else
 		write_unlock(&journal->j_state_lock);
@@ -321,6 +328,7 @@ static int tjournal_flush_all(journal_t *journal)
 	}
 	spin_unlock(&journal->j_list_lock);
 
+	tj_debug("all transaction being checkpointed\n");
 	if (is_journal_aborted(journal))
 		return -EIO;
 

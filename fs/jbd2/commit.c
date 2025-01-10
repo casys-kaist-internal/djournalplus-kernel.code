@@ -499,6 +499,9 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 	trace_jbd2_start_commit(journal, commit_transaction);
 	jbd2_debug(1, "JBD2: starting commit of transaction %d\n",
 			commit_transaction->t_tid);
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	tjc_debug("JBD2: Starting commit tx(%d)\n", commit_transaction->t_tid);
+#endif
 
 	write_lock(&journal->j_state_lock);
 	journal->j_fc_off = 0;
@@ -650,6 +653,9 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 	J_ASSERT(commit_transaction->t_nr_buffers <=
 		 atomic_read(&commit_transaction->t_outstanding_credits));
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	tj_debug("commit phase start\n");
+#endif
 	err = 0;
 	bufs = 0;
 	descriptor = NULL;
@@ -776,6 +782,8 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 											jh2bh(jh));
 		} else
 			write_tag_block(journal, tag, jh2bh(jh)->b_blocknr);
+		tj_debug("Add bh(%d) at %llu\n", (int)jh2bh(jh)->b_blocknr,
+				wbuf[bufs]->b_blocknr);
 #else
 		write_tag_block(journal, tag, jh2bh(jh)->b_blocknr);
 #endif
@@ -815,7 +823,9 @@ start_journal_io:
 			if (descriptor)
 				jbd2_descriptor_block_csum_set(journal,
 							descriptor);
-
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+			tj_debug("-----flush some buffers-----\n");
+#endif
 			for (i = 0; i < bufs; i++) {
 				struct buffer_head *bh = wbuf[i];
 				/*
@@ -826,7 +836,7 @@ start_journal_io:
 					    jbd2_checksum_data(crc32_sum, bh);
 				}
 #ifdef CONFIG_EXT4_TAU_JOURNALING
-				tjc_debug("commit bh(%lld)\n", bh->b_blocknr);
+				tj_debug("commit bh(%lld)\n", bh->b_blocknr);
 #endif
 				lock_buffer(bh);
 				clear_buffer_dirty(bh);
@@ -1294,12 +1304,11 @@ restart_loop:
 	wake_up(&journal->j_fc_wait);
 
 #ifdef CONFIG_EXT4_TAU_JOURNALING
-    tjc_debug("Commit finish - TID: %u | Left: %lu blocks (%lu MB) | Used: %u blocks (%u KB) "
-           "| Total: %d blocks (%lu MB)\n\n",
-        commit_transaction->t_tid,
+    tjk_debug("Finish commit Tx(%u): data blocks(%u)--%uKiB total blocks(%u).\n"
+           "     	 Journal area info: left blocks(%lu/%luMiB) total blocks(%d/%luMB).\n\n",
+        commit_transaction->t_tid, stats.run.rs_blocks, (stats.run.rs_blocks * journal->j_blocksize) >> 10,
+		stats.run.rs_blocks_logged,
         jbd2_log_space_left(journal), (jbd2_log_space_left(journal) * journal->j_blocksize) >> 20,
-        stats.run.rs_blocks + stats.run.rs_blocks_logged,
-		((stats.run.rs_blocks + stats.run.rs_blocks_logged) * journal->j_blocksize) >> 10,
 		journal->j_total_len, ((unsigned long)journal->j_total_len * journal->j_blocksize) >> 20);
 #endif
 	/*

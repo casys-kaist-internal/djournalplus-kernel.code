@@ -239,12 +239,13 @@ void ext4_evict_inode(struct inode *inode)
 			jbd2_complete_transaction(journal, commit_tid);
 
 			/* Umount can be hanging here if checkpoint got errors */
-			tjk_debug("[START] inode(%lu) checkpoint\n", inode->i_ino);
+			tjk_debug("[START] inode(%lu) wake up tjournald\n\n", inode->i_ino);
+			PRINT_INODE_INFO_COMPACT(inode);
 			journal->j_flags |= JBD2_FORCE_CHECKPOINT;
 			wake_up(&journal->j_wait_checkpoint);
 			wait_event(journal->j_wait_done_checkpoint,
 				   ei->i_journalled_da_tree.root == NULL);
-			tjk_debug("[DONE] inode(%lu) checkpoint\n",inode->i_ino);
+			tjk_debug("[DONE] inode(%lu) checkpointed well\n",inode->i_ino);
 		}
 #endif
 		truncate_inode_pages_final(&inode->i_data);
@@ -3538,7 +3539,7 @@ static unsigned tjournal_lookup_da_range(struct pagevec *pvec,
 	unsigned int cnt, len = 0;
 	unsigned nr, i, ret = 0;
 
-	tjk_debug("Inode(%lu) start(%lu) end(%lu).\n", inode->i_ino, *index, end);
+	tjk_debug("Inode(%lu) start(%lu) end(%d).\n", inode->i_ino, *index, (int)end);
 
 	cnt = 0;
 	folio_batch_init(&fbatch);
@@ -3602,14 +3603,14 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 	int blkbits = mpd->inode->i_blkbits;
 	ext4_lblk_t lblk;
 
-	tjk_debug("inode(%lu) nrpages(%ld)\n", inode->i_ino,
+	tjk_debug("inode(%lu) nr_pages(%ld)\n", inode->i_ino,
 		  inode->i_mapping->nrpages);
 
 	pagevec_init(&pvec);
 	mpd->map.m_len = 0;
 	mpd->next_page = index;
 	while (index <= end) {
-		tj_debug("inside loop(%lu) end(%lu)\n", index, end);
+		tj_debug("inside loop(%lu) end(%d)\n", index, (int)end);
 		nr_pages = tjournal_lookup_da_range(&pvec, inode, &index, end);
 		if (nr_pages == 0)
 			break;
@@ -3681,7 +3682,8 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 	return 0;
 out:
 	pagevec_release(&pvec);
-	pr_err("Error(%d) in tjournal_prepare_extent_to_map\n", err);
+	if (err)
+		pr_err("Error(%d) in tjournal_prepare_extent_to_map\n", err);
 	return err;
 }
 

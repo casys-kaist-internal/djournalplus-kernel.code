@@ -42,7 +42,7 @@ bool has_da_journalled(struct inode *inode);
 // #define TJOURNAL_COMMIT_DEBUG
 // #define TJOURNAL_HANDLE_DEBUG
 // #define TJOURNAL_DAEMON_DEBUG
-#define TJOURNAL_CHECKPOINT_DEBUG
+// #define TJOURNAL_CHECKPOINT_DEBUG
 
 #ifdef TJOURNAL_COMMIT_DEBUG
 #define tjc_debug(f, a...)                                           \
@@ -98,7 +98,7 @@ bool has_da_journalled(struct inode *inode);
 			pr_info("Invalid inode (NULL)\n");                                  \
 			break;                                                              \
 		}                                                                           \
-		pr_info("Inode [%lu]: type=%s, mode=0%o, size=%llu, nlink=%u, dev=%u:%u\n", \
+		pr_debug("     ↳ Inode(%lu): type=%s, mode=0%o, size=%llu, nlink=%u, dev=%u:%u\n", \
 			inode->i_ino,                                                       \
 			S_ISREG(inode->i_mode)	? "regular" :                               \
 			S_ISDIR(inode->i_mode)	? "dir" :                                   \

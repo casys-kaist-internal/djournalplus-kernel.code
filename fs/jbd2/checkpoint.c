@@ -22,6 +22,9 @@
 #include <linux/blkdev.h>
 #include <trace/events/jbd2.h>
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+#include "../ext4/tau_journal.h"
+#endif
 /*
  * Unlink a buffer from a transaction checkpoint list.
  *
@@ -88,6 +91,10 @@ static inline bool __cp_buffer_busy(struct journal_head *jh)
 {
 	struct buffer_head *bh = jh2bh(jh);
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	return (jh->b_transaction || buffer_locked(bh) || buffer_dirty(bh) ||
+				buffer_taudirty(bh));
+#endif
 	return (jh->b_transaction || buffer_locked(bh) || buffer_dirty(bh));
 }
 
@@ -820,5 +827,13 @@ void __jbd2_journal_drop_transaction(journal_t *journal, transaction_t *transact
 
 	trace_jbd2_drop_transaction(journal, transaction);
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	tjk_debug("Dropping transaction %d\n", transaction->t_tid);
+	if(journal->j_checkpoint_transactions)
+		tj_debug("next transaction %d\n",
+			 journal->j_checkpoint_transactions->t_tid);
+	else
+		tj_debug("no next transaction\n");
+#endif
 	jbd2_debug(1, "Dropping transaction %d, all done\n", transaction->t_tid);
 }
