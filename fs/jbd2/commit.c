@@ -25,6 +25,16 @@
 #include <linux/blkdev.h>
 #include <linux/bitops.h>
 #include <trace/events/jbd2.h>
+#include <asm/io.h>
+
+#define COMMIT_SUBMIT_BIO
+
+#ifdef COMMIT_SUBMIT_BIO
+struct dj_end_bio_private {
+	struct buffer_head **wbuf;
+	int nr;
+};
+#endif
 
 /*
  * IO end handler for temporary buffer_heads handling writes to the journal.
@@ -45,6 +55,24 @@ static void journal_end_buffer_io_sync(struct buffer_head *bh, int uptodate)
 	}
 	unlock_buffer(bh);
 }
+
+#ifdef COMMIT_SUBMIT_BIO
+static void dj_journal_end_bio_sync(struct bio *bio) {
+	struct dj_end_bio_private *p = bio->bi_private;
+	struct buffer_head *bh;
+	int i;
+
+	for (i = 0; i < p->nr; i++) {
+		bh = p->wbuf[i];
+		if (unlikely(bio_flagged(bio, BIO_QUIET)))
+			set_bit(BH_Quiet, &bh->b_state);
+		journal_end_buffer_io_sync(bh, !bio->bi_status);
+	}
+	kfree(p->wbuf);
+	kfree(p);
+	bio_put(bio);
+}
+#endif
 
 /*
  * When an ext4 file is truncated, it is possible that some pages are not
@@ -407,6 +435,10 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 	int csum_size = 0;
 	LIST_HEAD(io_bufs);
 	LIST_HEAD(log_bufs);
+#ifdef COMMIT_SUBMIT_BIO
+	struct bio *bio = NULL;
+	struct dj_end_bio_private *djp;
+#endif
 
 	if (jbd2_journal_has_csum_v2or3(journal))
 		csum_size = sizeof(struct jbd2_journal_block_tail);
@@ -646,6 +678,7 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 			J_ASSERT (bufs == 0);
 
 			jbd2_debug(4, "JBD2: get descriptor\n");
+			printk("Get descriptor\n");
 
 			descriptor = jbd2_journal_get_descriptor_buffer(
 							commit_transaction,
@@ -752,6 +785,61 @@ start_journal_io:
 				jbd2_descriptor_block_csum_set(journal,
 							descriptor);
 
+#ifdef COMMIT_SUBMIT_BIO
+			for (i = 0; i < bufs; i++) {
+				struct buffer_head *bh = wbuf[i];
+				/*
+				 * Compute checksum.
+				 */
+				if (jbd2_has_feature_checksum(journal)) {
+					crc32_sum =
+					    jbd2_checksum_data(crc32_sum, bh);
+				}
+			}
+			for (i = 0; i < bufs; i++) {
+				struct buffer_head *bh = wbuf[i];
+				lock_buffer(bh);
+				clear_buffer_dirty(bh);
+				set_buffer_uptodate(bh);
+				if (!bio) {
+alloc_new_bio:
+					bio = bio_alloc(journal->j_dev, 1,
+								REQ_OP_WRITE | REQ_SYNC, GFP_NOIO);
+					bio->bi_iter.bi_sector = bh->b_blocknr * (bh->b_size >> 9);
+					djp = kmalloc(sizeof(struct dj_end_bio_private), GFP_NOIO);
+					/* temporary */
+					djp->wbuf = &wbuf[i];
+					bio->bi_private = djp;
+					bio->bi_end_io = dj_journal_end_bio_sync;
+				}
+				if (bio_add_page(bio, bh->b_page, bh->b_size, bh_offset(bh)) != bh->b_size) {
+					struct buffer_head **mwbuf;
+					BUG_ON(&wbuf[i] == djp->wbuf);
+					djp->nr = &wbuf[i] - djp->wbuf;
+					mwbuf = kmalloc(sizeof(struct buffer_head *) * djp->nr, GFP_NOIO);
+					memcpy(mwbuf, djp->wbuf, sizeof(struct buffer_head *) * djp->nr);
+					djp->wbuf = mwbuf;
+					printk("[%%1]bio %d buffers\n", djp->nr);
+					guard_bio_eod(bio);
+					submit_bio(bio);
+					bio = NULL;
+					goto alloc_new_bio;
+				}
+				printk("Add page %p %p %lu\n", (char *)page_to_phys(bh->b_page) + bh_offset(bh), (char *)page_to_phys(bh->b_page) + bh_offset(bh) + bh->b_size, bh->b_blocknr);
+			}
+			if (bio) {
+				struct buffer_head **mwbuf;
+				BUG_ON(&wbuf[i] == djp->wbuf);
+				djp->nr = &wbuf[i] - djp->wbuf;
+				mwbuf = kmalloc(sizeof(struct buffer_head *) * djp->nr, GFP_NOIO);
+				memcpy(mwbuf, djp->wbuf, sizeof(struct buffer_head *) * djp->nr);
+				djp->wbuf = mwbuf;
+				printk("[%%2]bio %d buffers\n", djp->nr);
+				guard_bio_eod(bio);
+				submit_bio(bio);
+				bio = NULL;
+			}
+#else
 			for (i = 0; i < bufs; i++) {
 				struct buffer_head *bh = wbuf[i];
 				/*
@@ -768,6 +856,7 @@ start_journal_io:
 				bh->b_end_io = journal_end_buffer_io_sync;
 				submit_bh(REQ_OP_WRITE | REQ_SYNC, bh);
 			}
+#endif
 			cond_resched();
 
 			/* Force a new descriptor to be generated next
