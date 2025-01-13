@@ -224,9 +224,8 @@ void ext4_evict_inode(struct inode *inode)
 			jbd2_complete_transaction(journal, commit_tid);
 			filemap_write_and_wait(&inode->i_data);
 		}
-		truncate_inode_pages_final(&inode->i_data);
-
 #ifdef CONFIG_EXT4_TAU_JOURNALING
+		/* Note that we have to do before truncate_inode_pages() */
 		if (inode->i_ino != EXT4_JOURNAL_INO &&
 		    ext4_should_journal_plus(inode) &&
 			S_ISREG(inode->i_mode) && inode->i_data.nrpages) {
@@ -240,14 +239,16 @@ void ext4_evict_inode(struct inode *inode)
 			jbd2_complete_transaction(journal, commit_tid);
 
 			/* Umount can be hanging here if checkpoint got errors */
-			tjk_debug("[START] inode(%lu) checkpoint\n", inode->i_ino);
+			tjk_debug("[START] inode(%lu) wake up tjournald\n\n", inode->i_ino);
+			PRINT_INODE_INFO_COMPACT(inode);
 			journal->j_flags |= JBD2_FORCE_CHECKPOINT;
 			wake_up(&journal->j_wait_checkpoint);
 			wait_event(journal->j_wait_done_checkpoint,
 				   ei->i_journalled_da_tree.root == NULL);
-			tjk_debug("[DONE] inode(%lu) checkpoint\n",inode->i_ino);
+			tjk_debug("[DONE] inode(%lu) checkpointed well\n",inode->i_ino);
 		}
 #endif
+		truncate_inode_pages_final(&inode->i_data);
 		goto no_delete;
 	}
 
@@ -3538,13 +3539,15 @@ static unsigned tjournal_lookup_da_range(struct pagevec *pvec,
 	unsigned int cnt, len = 0;
 	unsigned nr, i, ret = 0;
 
+	tjk_debug("Inode(%lu) start(%lu) end(%d).\n", inode->i_ino, *index, (int)end);
+
 	cnt = 0;
 	folio_batch_init(&fbatch);
 	while ((ret = lookup_da_journalled(inode, *index, &len))) {
 		if (len > PAGEVEC_SIZE - cnt)
 			len = PAGEVEC_SIZE - cnt;
 
-		tjk_debug("ret: %d, len: %d next_index:%lu\n", ret, len, *index);
+		tj_debug("Found start(%lu) len(%d).\n", *index, len);
 		nr = filemap_get_folios(mapping, index, *index + len - 1,
 					&fbatch);
 		if (nr == 0) {
@@ -3582,6 +3585,7 @@ static unsigned tjournal_lookup_da_range(struct pagevec *pvec,
 		*index = (pgoff_t)-1;
 
 out:
+	tj_debug("cnt(%d) next index(%d)\n",cnt, (int)*index);
 	return cnt;
 }
 
@@ -3599,13 +3603,14 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 	int blkbits = mpd->inode->i_blkbits;
 	ext4_lblk_t lblk;
 
-	tjk_debug("inode(%lu) nrpages(%ld)\n", inode->i_ino,
+	tjk_debug("inode(%lu) nr_pages(%ld)\n", inode->i_ino,
 		  inode->i_mapping->nrpages);
 
 	pagevec_init(&pvec);
 	mpd->map.m_len = 0;
 	mpd->next_page = index;
 	while (index <= end) {
+		tj_debug("inside loop(%lu) end(%d)\n", index, (int)end);
 		nr_pages = tjournal_lookup_da_range(&pvec, inode, &index, end);
 		if (nr_pages == 0)
 			break;
@@ -3613,7 +3618,7 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 		for (i = 0; i < nr_pages; i++) {
 			struct page *page = pvec.pages[i];
 
-			PRINT_PAGE_FLAGS_COMPACT(page);
+			// PRINT_PAGE_FLAGS_COMPACT(page);
 			/* If we can't merge this page, we are done. */
 			if (mpd->map.m_len > 0 && mpd->next_page != page->index)
 				goto out;
@@ -3677,16 +3682,15 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 	return 0;
 out:
 	pagevec_release(&pvec);
+	if (err)
+		pr_err("Error(%d) in tjournal_prepare_extent_to_map\n", err);
 	return err;
 }
 
 static int tjournal_do_writepages(struct mpage_da_data *mpd)
 {
 	struct writeback_control *wbc = mpd->wbc;
-	pgoff_t writeback_index = 0;
 	long nr_to_write = wbc->nr_to_write;
-	int range_whole = 0;
-	int cycled = 1;
 	handle_t *handle = NULL;
 	struct inode *inode = mpd->inode;
 	struct address_space *mapping = inode->i_mapping;
@@ -3729,7 +3733,8 @@ static int tjournal_do_writepages(struct mpage_da_data *mpd)
 
 	ext4_io_submit_init(&mpd->io_submit, wbc);
 	blk_start_plug(&plug);
-retry:
+	mpd->first_page = wbc->range_start >> PAGE_SHIFT;
+	mpd->last_page = wbc->range_end >> PAGE_SHIFT;
 	mpd->scanned_until_end = 0;
 	while (!mpd->scanned_until_end && wbc->nr_to_write > 0) {
 		/* For each extent of pages we use new io_end */
@@ -3801,29 +3806,14 @@ retry:
 			break;
 	}
 
-	if (!ret && !cycled && wbc->nr_to_write > 0) {
-		cycled = 1;
-		mpd->last_page = writeback_index - 1;
-		mpd->first_page = 0;
-		goto retry;
-	}
-
 	blk_finish_plug(&plug);
 
 	/* Wait for index blocks are being committed */
 	if (jbd2_log_start_commit(sbi->s_journal, old_tid)) {
-		tjk_debug("start commit: %u\n\n", old_tid);
+		tj_debug("start commit: %u\n\n", old_tid);
 		jbd2_log_wait_commit(sbi->s_journal, old_tid);
-		tjk_debug("Tx(%u) done, get back to checkpoint context\n", old_tid);
+		tj_debug("Tx(%u) done, get back to checkpoint context\n", old_tid);
 	}
-
-	/* Update index */
-	if (wbc->range_cyclic || (range_whole && wbc->nr_to_write > 0))
-		/*
-		 * Set the writeback_index so that range_cyclic
-		 * mode will write it back later
-		 */
-		mapping->writeback_index = mpd->first_page;
 
 out_writepages:
 	trace_ext4_writepages_result(inode, wbc, ret,

@@ -2095,9 +2095,12 @@ static void __jbd2_journal_temp_unlink_buffer(struct journal_head *jh)
 		clear_buffer_jbddirty(bh);
 	else if (test_clear_buffer_jbddirty(bh)) {
 #ifdef CONFIG_EXT4_TAU_JOURNALING
+		tjc_debug("buffer(%d) being unlinked\n", (int)bh->b_blocknr);
 		/* We don't need to do already journalled */
-		if (buffer_taudirty(bh))
+		if (buffer_taudirty(bh)) {
+			tj_debug("already dirty\n");
 			return;
+		}
 		/* Mount with tau-journaling mode, handle for different journal mode */
 		if (transaction->t_journal->j_flags & JBD2_EXT4_JOURNAL_PLUS) {
 			struct page *page = bh->b_page;
@@ -2106,18 +2109,26 @@ static void __jbd2_journal_temp_unlink_buffer(struct journal_head *jh)
 
 			BUG_ON(!mapping);
 			inode = mapping->host;
+			PRINT_INODE_INFO_COMPACT(inode);
+
 			/* Filesystem's metadata (superblock, bitmap and etc ...) */
 			if (S_ISBLK(inode->i_mode)) {
+				tj_debug("metadata block\n");
 				set_buffer_taudirty(bh);
 				return;
 			}
 			/* Since we are using dual-mode journaling, should handle differently */
-			if (!ext4_should_journal_plus(inode))
+			if (!ext4_should_journal_plus(inode)) {
+				tj_debug("not using data journal mode\n");
 				mark_buffer_dirty(bh);
+			}
 			else {
 				/* This buffer is not allocated yet */
-				if (buffer_delay(bh))
+				if (buffer_delay(bh)) {
+					tj_debug("delayed block\n");
 					insert_da_journalled(inode, page->index);
+				}
+				tj_debug("set dirty\n");
 				set_buffer_taudirty(bh);
 			}
 		} else
@@ -2405,12 +2416,42 @@ static int journal_unmap_buffer(journal_t *journal, struct buffer_head *bh,
 		}
 
 #ifdef CONFIG_EXT4_TAU_JOURNALING
-		/* Note: this function called during handling umount filesystem
-		*       we cannot wake tjournald to do checkpoint since thie thread
-		*       hold all folios lock (hard to unlock at this function)
-		*       So, if there exist some blocks in this code, that might be a bug */
-		if (journal->j_flags & JBD2_EXT4_JOURNAL_PLUS)
-			BUG_ON(buffer_delay(bh));
+		/* Note: This called during handling umounting or truncate file
+		*       For umount, we can't wake tjournald to flush since this thread
+		*       hold all folios lock (complicate to unlock at this moment)
+		*       so, if there exist some blocks in this code, that might be a bug.
+		*/
+		if (buffer_taudirty(bh)) {
+			clear_buffer_taudirty(bh);
+			tjk_debug("block(%llu) unmapped\n", bh->b_blocknr);
+			/* Checking for bug (later this will be deleted) */
+			if (buffer_delay(bh)) {
+				struct inode *inode = bh->b_page->mapping->host;
+				if (!(inode->i_sb->s_flags & SB_ACTIVE)) {
+					pr_err("block(%llu) remain on umount\n", bh->b_blocknr);
+					goto zap_buffer;
+				}
+			}
+			/* It cannot be checkpointed until current transcation committed. */
+			if (journal->j_running_transaction) {
+				tj_debug("running transaction\n");
+				may_free = __dispose_buffer(jh,
+					journal->j_running_transaction);
+				goto zap_buffer;
+			} else {
+				if (journal->j_committing_transaction) {
+					tj_debug("committing transaction\n");
+					may_free = __dispose_buffer(jh,
+					journal->j_committing_transaction);
+					goto zap_buffer;
+				}
+				else {
+					tj_debug("no transaction\n");
+					__jbd2_journal_remove_checkpoint(jh);
+					goto zap_buffer;
+				}
+			}
+		}
 #endif
 		if (!buffer_dirty(bh)) {
 			/* bdflush has written it.  We can drop it now */
