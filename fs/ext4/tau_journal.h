@@ -33,6 +33,7 @@ bool tjournal_try_to_free_buffers(struct folio *);
 int tjournal_start_thread(journal_t *);
 
 /* Delayed allocation */
+void print_tjournal_da_tree_all(struct inode *);
 void insert_da_journalled(struct inode *, pgoff_t index);
 int lookup_da_journalled(struct inode *, pgoff_t index, unsigned int *len);
 int truncate_da_journalled(struct inode *, pgoff_t start, unsigned int len);

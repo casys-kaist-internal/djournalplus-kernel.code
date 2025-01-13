@@ -30,6 +30,30 @@ bool has_da_journalled(struct inode *inode)
 	return ei->i_journalled_da_tree.root != NULL;
 }
 
+void __print_da_tree_all(struct tjournal_da_node *node, int depth)
+{
+	if (node->left)
+		__print_da_tree_all(node->left, depth + 1);
+
+	pr_info("node(%lu, %d), depth(%d)\n", node->start, node->len, depth);
+
+	if (node->right)
+		__print_da_tree_all(node->right, depth + 1);
+}
+
+
+void print_tjournal_da_tree_all(struct inode *inode)
+{
+	struct ext4_inode_info *ei = EXT4_I(inode);
+	struct tjournal_da_tree *root = &ei->i_journalled_da_tree;
+
+	if (!root->root) {
+		printk("No journalled data blocks\n");
+		return;
+	}
+	__print_da_tree_all(root->root, 0);
+}
+
 bool tjournal_try_to_free_buffers(struct folio *folio)
 {
 	struct ext4_inode_info *ei;
@@ -550,10 +574,16 @@ static void __insert_da_node(struct tjournal_da_node *node, pgoff_t index)
 			}
 		}
 		/* Make right node if not exist */
-		else if (!node->right)
+		else if (!node->right) {
+			tjk_debug("node(%lu, %u) index(%lu) right(%lu, %u)\n", node->start,
+				  node->len, index, node->right->start, node->right->len);
 			node->right = create_da_node(index, 1);
-		else
+		}
+		else {
+			tjk_debug("node(%lu, %u) index(%lu) no right\n", node->start,
+				  node->len, index);
 			__insert_da_node(node->right, index);
+		}
 	}
 }
 
@@ -625,7 +655,8 @@ static int __truncate_da_journalled(struct tjournal_da_tree *tree,
 	pgoff_t end = start + len;
 	int ret = 0;
 
-	tjk_debug("start: %lu, len: %u\n", start, len);
+	tjk_debug("start(%lu) len(%u) root(%lu, %u)\n", start, len
+		,tree->root->start, tree->root->len);
 
 	spin_lock(&tree->lock);
 	node = find_node(tree->root, start);
@@ -699,6 +730,10 @@ static int __truncate_da_journalled(struct tjournal_da_tree *tree,
 
 unlock:
 	spin_unlock(&tree->lock);
+	if (tree->root)
+		tj_debug("ret(%d) root(%lu, %u)\n", ret ,tree->root->start, tree->root->len);
+	else
+		tj_debug("ret(%d) no delayed allocatio states\n", ret);
 	return ret;
 }
 
