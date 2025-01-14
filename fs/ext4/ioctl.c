@@ -1214,6 +1214,27 @@ static int ext4_ioctl_setuuid(struct file *filp,
 	return ret;
 }
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+static int ext4_ioc_start_atomic_write(struct file *filep) {
+	ext4_journal_start(file_inode(filep), EXT4_HT_WRITE_PAGE, 128);
+	return 0;
+}
+static int ext4_ioc_commit_atomic_write(struct file *filep) {
+	handle_t *handle = journal_current_handle();
+	BUG_ON(!handle);
+	ext4_journal_stop(handle);
+	return 0;
+}
+static int ext4_ioc_get_features(struct file *filep, unsigned long arg) {
+	u32 features = 0;
+
+	if (test_opt2(filep->f_inode->i_sb, JOURNAL_PLUS))
+		features |= EXT4_FEATURE_ATOMIC_WRITE;
+
+	return put_user(features, (u32 __user *)arg);
+}
+#endif
+
 static long __ext4_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	struct inode *inode = file_inode(filp);
@@ -1601,6 +1622,19 @@ resizefs_out:
 		return ext4_ioctl_getuuid(EXT4_SB(sb), (void __user *)arg);
 	case EXT4_IOC_SETFSUUID:
 		return ext4_ioctl_setuuid(filp, (const void __user *)arg);
+
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	/* not implemented */
+	case EXT4_IOC_START_ATOMIC_WRITE:
+		return ext4_ioc_start_atomic_write(filp);
+	case EXT4_IOC_COMMIT_ATOMIC_WRITE:
+		return ext4_ioc_commit_atomic_write(filp);
+	case EXT4_IOC_ABORT_ATOMIC_WRITE:
+		return -ENOTTY;
+	case EXT4_IOC_GET_FEATURES:
+		return ext4_ioc_get_features(filp, arg);
+#endif
+
 	default:
 		return -ENOTTY;
 	}
