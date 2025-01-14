@@ -3539,8 +3539,8 @@ static unsigned tjournal_lookup_da_range(struct pagevec *pvec,
 	unsigned ret = 0;
 	// tjk_debug("Inode(%lu) start(%lu) end(%d).\n", inode->i_ino, *index, (int)end);
 
-	ret = lookup_da_journalled(inode, *index, &len);
-	if (!ret) // nothing to do
+	ret = lookup_da_journalled(inode, index, &len);
+	if (!ret)
 		return ret;
 
 	return pagevec_lookup_range_tag(pvec, mapping, index, *index + len - 1,
@@ -3568,11 +3568,12 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 	mpd->map.m_len = 0;
 	mpd->next_page = index;
 	while (index <= end) {
-		tj_debug("[while start] index(%lu) end(%d) %d\n", index, (int)end, (int)((pgoff_t)-1));
 		nr_pages = tjournal_lookup_da_range(&pvec, inode, &index, end);
-		tj_debug("tjournal_lookup_da_range next index(%lu) nr(%d)\n", index, nr_pages);
-		if (nr_pages == 0)
+		if (nr_pages == 0) {
+			if (!mpd->map.m_len && index != (pgoff_t)-1)
+				continue; /* until end of file */
 			break;
+		}
 
 		for (i = 0; i < nr_pages; i++) {
 			struct page *page = pvec.pages[i];
@@ -3745,23 +3746,19 @@ static int tjournal_do_writepages(struct mpage_da_data *mpd)
 		mpd->do_map = 1;
 
 		ret = tjournal_prepare_extent_to_map(mpd);
-		if (!ret) {
-			tj_debug("prepare_extent_to_map done start(%u) len(%d)\n",
-					mpd->map.m_lblk, mpd->map.m_len);
-			truncate_da_journalled(inode, mpd->map.m_lblk, mpd->map.m_len);
-		}
 
 		/* mpd->map value will change: len --> 0, pblock --> allocated */
 		if (!ret && mpd->map.m_len) {
 			tj_debug("map_and_submit_extent start(%u) len(%d)\n",
 					mpd->map.m_lblk, mpd->map.m_len);
+			truncate_da_journalled(inode, mpd->map.m_lblk, mpd->map.m_len);
 			ret = mpage_map_and_submit_extent(handle, mpd,
 							  &give_up_on_write);
 		}
 
 		/* We can stop handle here, since we are not using metadata journaling
 		 * Data will be exist in journal area so that no risk to loss data */
-	    ext4_put_io_end_defer(mpd->io_submit.io_end);
+		ext4_put_io_end_defer(mpd->io_submit.io_end);
 		ext4_journal_stop(handle);
 
 		/* We need to */

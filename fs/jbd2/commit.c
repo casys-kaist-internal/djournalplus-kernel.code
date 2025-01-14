@@ -654,7 +654,7 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 		 atomic_read(&commit_transaction->t_outstanding_credits));
 
 #ifdef CONFIG_EXT4_TAU_JOURNALING
-	tj_debug("commit phase start\n");
+	tjc__debug("commit phase start\n");
 #endif
 	err = 0;
 	bufs = 0;
@@ -782,7 +782,7 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 											jh2bh(jh));
 		} else
 			write_tag_block(journal, tag, jh2bh(jh)->b_blocknr);
-		tj_debug("Add bh(%d) at %llu\n", (int)jh2bh(jh)->b_blocknr,
+		tjc__debug("Add bh(%d) at %llu\n", (int)jh2bh(jh)->b_blocknr,
 				wbuf[bufs]->b_blocknr);
 #else
 		write_tag_block(journal, tag, jh2bh(jh)->b_blocknr);
@@ -824,7 +824,7 @@ start_journal_io:
 				jbd2_descriptor_block_csum_set(journal,
 							descriptor);
 #ifdef CONFIG_EXT4_TAU_JOURNALING
-			tj_debug("-----flush some buffers-----\n");
+			tjc__debug("-----flush some buffers-----\n");
 #endif
 			for (i = 0; i < bufs; i++) {
 				struct buffer_head *bh = wbuf[i];
@@ -836,7 +836,7 @@ start_journal_io:
 					    jbd2_checksum_data(crc32_sum, bh);
 				}
 #ifdef CONFIG_EXT4_TAU_JOURNALING
-				tj_debug("commit bh(%lld)\n", bh->b_blocknr);
+				tjc__debug("commit bh(%lld)\n", bh->b_blocknr);
 #endif
 				lock_buffer(bh);
 				clear_buffer_dirty(bh);

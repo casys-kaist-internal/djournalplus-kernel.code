@@ -35,7 +35,7 @@ int tjournal_start_thread(journal_t *);
 /* Delayed allocation */
 void print_tjournal_da_tree_all(struct inode *);
 void insert_da_journalled(struct inode *, pgoff_t index);
-int lookup_da_journalled(struct inode *, pgoff_t index, unsigned int *len);
+int lookup_da_journalled(struct inode *, pgoff_t *index, unsigned int *len);
 int truncate_da_journalled(struct inode *, pgoff_t start, unsigned int len);
 bool has_da_journalled(struct inode *inode);
 
@@ -52,8 +52,13 @@ bool has_da_journalled(struct inode *inode);
 		       __LINE__);                                    \
 		printk(KERN_DEBUG "     ↳ " f, ##a);                 \
 	} while (0)
+#define tjc__debug(f, a...)                                           \
+	do {                                                         \
+		printk(KERN_DEBUG "     	↳ " f, ##a);                 \
+	} while (0)
 #else
 #define tjc_debug(fmt, ...) no_printk(fmt, ##__VA_ARGS__)
+#define tjc__debug(fmt, ...) no_printk(fmt, ##__VA_ARGS__)
 #endif
 
 #ifdef TJOURNAL_HANDLE_DEBUG

@@ -118,7 +118,7 @@ __releases(&journal->j_state_lock)
 		/* Is it possible that cannot wake up if no journal area? */
 		wake_up(&journal->j_wait_checkpoint);
 		wait_event(journal->j_wait_done_checkpoint,
-			 jbd2_log_space_left(journal) < nblocks);
+			 jbd2_log_space_left(journal) >= nblocks);
 		return;
 	}
 #endif
