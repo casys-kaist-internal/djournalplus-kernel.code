@@ -373,7 +373,7 @@ static ssize_t ext4jp_buffered_write_iter(struct kiocb *iocb,
 
 	/* Total data blocks */
 	block_size =  1 << inode->i_sb->s_blocksize_bits;
-	nr_blks = (from->count + block_size - 1) / block_size;
+	nr_blks = (iocb->ki_pos % block_size + from->count + block_size - 1) / block_size;
 
 	/* Grab pages first in batch w/o locking */
 	pages = ext4jp_prepare_pages(inode, iocb, nr_blks);
