@@ -36,8 +36,9 @@ int tjournal_start_thread(journal_t *);
 void print_tjournal_da_tree_all(struct inode *);
 void insert_da_journalled(struct inode *, pgoff_t index);
 int lookup_da_journalled(struct inode *, pgoff_t *index, unsigned int *len);
-int truncate_da_journalled(struct inode *, pgoff_t start, unsigned int len);
+int delete_da_journalled(struct inode *, pgoff_t start, unsigned int len);
 bool has_da_journalled(struct inode *inode);
+int truncate_da_journalled(struct inode *inode, pgoff_t start);
 
 #define tj_warn(fmt, ...) printk(KERN_WARNING "     ↳ " fmt, ##__VA_ARGS__)
 

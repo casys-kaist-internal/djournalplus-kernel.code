@@ -3774,9 +3774,9 @@ static int tjournal_do_writepages(struct mpage_da_data *mpd)
 				pr_err("mpage_map_and_submit_extent ret(%d)\n", ret);
 			/* extent can be different from our request on map_and_submit 
 			 * we must handle truncate_da after do submit extents and data */
-			if (truncate_da_journalled(inode, mpd->map.m_lblk,
+			if (delete_da_journalled(inode, mpd->map.m_lblk,
 							mpd->first_page - mpd->map.m_lblk) < 0)
-				pr_err("truncate_da_journalled failed\n");
+				pr_err("delete_da_journalled failed\n");
 		}
 
 		/* We can stop handle here, since we are not using metadata journaling
@@ -4270,8 +4270,10 @@ static bool ext4_release_folio(struct folio *folio, gfp_t wait)
 	trace_ext4_releasepage(&folio->page);
 
 #ifdef CONFIG_EXT4_TAU_JOURNALING
-	if (journal && journal->j_flags & JBD2_EXT4_JOURNAL_PLUS)
+	if (journal && journal->j_flags & JBD2_EXT4_JOURNAL_PLUS) {
+		tj_warn("try to free buffers\n");
 		return tjournal_try_to_free_buffers(folio);
+	}
 #endif
 	/* Page has dirty journalled data -> cannot release */
 	if (folio_test_checked(folio))
@@ -6555,6 +6557,12 @@ int ext4_setattr(struct user_namespace *mnt_userns, struct dentry *dentry,
 			}
 		}
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+		if (ext4_should_journal_plus(inode)) {
+			truncate_da_journalled(inode, DIV_ROUND_UP(inode->i_size,
+							 PAGE_SIZE));
+		}
+#endif
 		/*
 		 * Truncate pagecache after we've waited for commit
 		 * in data=journal mode to make pages freeable.

@@ -759,8 +759,8 @@ int lookup_da_journalled(struct inode *inode, pgoff_t *index, unsigned int *len)
 	return __lookup_da_journalled(&ei->i_journalled_da_tree, index, len);
 }
 
-static int __truncate_da_journalled(struct tjournal_da_tree *tree,
-				    pgoff_t start, unsigned int len)
+static int __delete_da_journalled(struct tjournal_da_tree *tree, pgoff_t start,
+				  unsigned int len)
 {
 	struct tjournal_da_node *node = NULL;
 	pgoff_t end = start + len;
@@ -849,9 +849,64 @@ unlock:
 	return ret;
 }
 
-int truncate_da_journalled(struct inode *inode, pgoff_t start, unsigned int len)
+int delete_da_journalled(struct inode *inode, pgoff_t start, unsigned int len)
 {
 	struct ext4_inode_info *ei = EXT4_I(inode);
-	return __truncate_da_journalled(&ei->i_journalled_da_tree, start, len);
+	return __delete_da_journalled(&ei->i_journalled_da_tree, start, len);
 }
+
+static void free_da_journalled(struct tjournal_da_node *node)
+{
+	if (!node)
+		return;
+
+	if (node->left)
+		free_da_journalled(node->left);
+	if (node->right)
+		free_da_journalled(node->right);
+
+	kfree(node);
+}
+
+static struct tjournal_da_node *
+__truncate_da_journalled(struct tjournal_da_node *node, pgoff_t start)
+{
+	if (!node)
+		return NULL;
+
+	if (node->start > start) {
+		free_da_journalled(node);
+		return NULL;
+	}
+
+	if (node->start <= start && node->start + node->len > start) {
+		node->len = start - node->start;
+		if (node->right) {
+			free_da_journalled(node->right);
+			node->right = NULL;
+		}
+		return node;
+	}
+
+	node->left = __truncate_da_journalled(node->left, start);
+	node->right = __truncate_da_journalled(node->right, start);
+
+	return node;
+}
+
+/**
+ * @brief truncate da_tree from start (inclusive)
+ *
+*/
+int truncate_da_journalled(struct inode *inode, pgoff_t start)
+{
+	struct ext4_inode_info *ei = EXT4_I(inode);
+	struct tjournal_da_tree *tree = &ei->i_journalled_da_tree;
+
+	spin_lock(&tree->lock);
+	tree->root = __truncate_da_journalled(tree->root, start);
+	spin_unlock(&tree->lock);
+	return 0;
+}
+
 #endif /* CONFIG_EXT4_TAU_JOURNALING */
