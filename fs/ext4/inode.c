@@ -1825,6 +1825,20 @@ static void mpage_release_unused_pages(struct mpage_da_data *mpd,
 						folio_size(folio));
 				folio_clear_uptodate(folio);
 			}
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+			/* unused buffers in tau-journaling make taudirty */
+			if (ext4_should_journal_plus(inode)) {
+				struct buffer_head *head, *bh;
+				head = folio_buffers(folio);
+				bh = head;
+				do {
+					if (buffer_dirty(bh)) {
+						set_buffer_taudirty(bh);
+						clear_buffer_dirty(bh);
+					}
+				} while ((bh = bh->b_this_page) != head);
+			}
+#endif
 			folio_unlock(folio);
 		}
 		folio_batch_release(&fbatch);
@@ -3561,9 +3575,6 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 	int blkbits = mpd->inode->i_blkbits;
 	ext4_lblk_t lblk;
 
-	tjk_debug("inode(%lu) nr_pages(%ld)\n", inode->i_ino,
-		  inode->i_mapping->nrpages);
-
 	pagevec_init(&pvec);
 	mpd->map.m_len = 0;
 	mpd->next_page = index;
@@ -3572,6 +3583,7 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 		if (nr_pages == 0) {
 			if (!mpd->map.m_len && index != (pgoff_t)-1)
 				continue; /* until end of file */
+			mpd->next_page = index;
 			break;
 		}
 
@@ -3581,8 +3593,8 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 			// PRINT_PAGE_FLAGS_COMPACT(page);
 			/* If we can't merge this page, we are done. */
 			if (mpd->map.m_len > 0 && mpd->next_page != page->index) {
-				tj_debug("not contiguous page(%lu) next(%lu)\n",
-					  page->index, mpd->next_page);
+				tj_debug("not contiguous(%lu) expected(%lu), nr_pages(%u), map_len(%d)\n",
+					  page->index, mpd->next_page, nr_pages, mpd->map.m_len);
 				goto out;
 			}
 
@@ -3611,7 +3623,7 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 			/* mpd structs stacks un-allocated contiguous pages */
 			if (mpd->map.m_len == 0) { // now start
 				mpd->first_page = page->index;
-				tj_debug("first page(%lu)\n", page->index);
+				// tj_debug("first page(%lu)\n", page->index);
 			}
 			mpd->next_page = page->index + 1;
 			/*
@@ -3650,12 +3662,16 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 		pagevec_release(&pvec);
 		cond_resched();
 	}
+	tj_debug("(%s) mpd_first(%lu)/next(%lu) len(%d)\n",
+		__func__, mpd->first_page, mpd->next_page, mpd->map.m_len);
 	mpd->scanned_until_end = 1;
 	return 0;
 out:
 	pagevec_release(&pvec);
 	if (err)
 		pr_err("Error(%d) in tjournal_prepare_extent_to_map\n", err);
+	tj_debug(" [%s] mpd_first(%lu)/next(%lu) len(%d)\n",
+		__func__, mpd->first_page, mpd->next_page, mpd->map.m_len);
 	return err;
 }
 
@@ -3680,7 +3696,7 @@ static int tjournal_do_writepages(struct mpage_da_data *mpd)
 
 	/* If there is nothing to checkpoint, this function might not be called ... */
 	if (!mapping->nrpages || !has_da_journalled(inode)) {
-		pr_warn("Nothing to chkpt nr: %ld\n", mapping->nrpages);
+		tj_warn("Nothing to checkpoint nr(%ld)\n", mapping->nrpages);
 		goto out_writepages;
 	}
 	// tj_debug("... checking the delayed states\n");
@@ -3745,15 +3761,22 @@ static int tjournal_do_writepages(struct mpage_da_data *mpd)
 		}
 		mpd->do_map = 1;
 
-		ret = tjournal_prepare_extent_to_map(mpd);
-
 		/* mpd->map value will change: len --> 0, pblock --> allocated */
+		ret = tjournal_prepare_extent_to_map(mpd);
 		if (!ret && mpd->map.m_len) {
-			tj_debug("map_and_submit_extent start(%u) len(%d)\n",
-					mpd->map.m_lblk, mpd->map.m_len);
-			truncate_da_journalled(inode, mpd->map.m_lblk, mpd->map.m_len);
+			tj_debug("map_and_submit_extent start(%u) len(%d) first(%lu)\n",
+					mpd->map.m_lblk, mpd->map.m_len, mpd->first_page);
 			ret = mpage_map_and_submit_extent(handle, mpd,
 							  &give_up_on_write);
+			if (give_up_on_write)
+				tj_warn("give up on write\n");
+			if (ret < 0)
+				pr_err("mpage_map_and_submit_extent ret(%d)\n", ret);
+			/* extent can be different from our request on map_and_submit 
+			 * we must handle truncate_da after do submit extents and data */
+			if (truncate_da_journalled(inode, mpd->map.m_lblk,
+							mpd->first_page - mpd->map.m_lblk) < 0)
+				pr_err("truncate_da_journalled failed\n");
 		}
 
 		/* We can stop handle here, since we are not using metadata journaling
