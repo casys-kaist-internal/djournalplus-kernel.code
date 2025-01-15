@@ -13,8 +13,6 @@
 #include <linux/freezer.h>
 #include "linux/writeback.h"
 
-
-
 void tjournal_init_inode(struct inode *inode)
 {
 	struct ext4_inode_info *ei;
@@ -28,6 +26,29 @@ bool has_da_journalled(struct inode *inode)
 {
 	struct ext4_inode_info *ei = EXT4_I(inode);
 	return ei->i_journalled_da_tree.root != NULL;
+}
+
+void __print_da_tree_all(struct tjournal_da_node *node, int depth)
+{
+	if (node->left)
+		__print_da_tree_all(node->left, depth + 1);
+
+	pr_info("node(%lu, %d), depth(%d)\n", node->start, node->len, depth);
+
+	if (node->right)
+		__print_da_tree_all(node->right, depth + 1);
+}
+
+void print_tjournal_da_tree_all(struct inode *inode)
+{
+	struct ext4_inode_info *ei = EXT4_I(inode);
+	struct tjournal_da_tree *root = &ei->i_journalled_da_tree;
+
+	if (!root->root) {
+		printk("No journalled data blocks\n");
+		return;
+	}
+	__print_da_tree_all(root->root, 0);
 }
 
 bool tjournal_try_to_free_buffers(struct folio *folio)
@@ -128,6 +149,7 @@ static int tjournal_start_checkpoint(journal_t *journal)
 	struct buffer_head *bh;
 	transaction_t *transaction;
 	tid_t this_tid;
+	pgoff_t delayed = -1; /* Just for error checking */
 	int result, batch_count = 0;
 
 	/*
@@ -172,12 +194,15 @@ restart:
 
 		/* We need to allocate delayed data blocks here */
 		if (buffer_delay(bh)) {
-			tj_debug("delayed block require allocation\n");
+			tj_debug("delayed block(%lu) require allocation!\n",
+				 bh->b_page->index);
 			get_bh(bh);
 			spin_unlock(&journal->j_list_lock);
+			BUG_ON(delayed == bh->b_page->index);
 			BUG_ON(bh->b_page->mapping == NULL);
 			tjournal_writepages(bh->b_page->mapping);
 			// TODO: error handling
+			delayed = bh->b_page->index;
 			__brelse(bh);
 			goto retry;
 		}
@@ -301,7 +326,7 @@ static int tjournal_flush_all(journal_t *journal)
 		transaction = journal->j_running_transaction;
 		write_unlock(&journal->j_state_lock);
 		tj_debug("start commit running transaction(%d)\n",
-					transaction->t_tid);
+			 transaction->t_tid);
 		jbd2_log_start_commit(journal, transaction->t_tid);
 		write_lock(&journal->j_state_lock);
 	} else if (journal->j_committing_transaction)
@@ -470,36 +495,55 @@ static struct tjournal_da_node *most_node(struct tjournal_da_node *node,
 
 static void __insert_da_node(struct tjournal_da_node *node, pgoff_t index)
 {
-	// tjk_debug("node start(%lu) len(%d) page_index(%lu)\n",
-	// 	  node->start, node->len, index);
+	/* Already exist in the da_tree */
+	if (index == node->start ||
+	    (index > node->start && index < node->start + node->len))
+		return;
 
 	/* Index is smaller than this node */
 	if (index < node->start) {
 		/* Direct merge with left node */
 		if (index + 1 == node->start) {
-			struct tjournal_da_node *left = node->left;
+			tj_debug(
+				"Page(%lu) be merged with node(%lu, %d)_left\n",
+				index, node->start, node->len);
 			node->start = index;
 			node->len++;
 
-			if (left) {
+			/* If merged node has a child, we need to check child can be merged */
+			if (node->left) {
+				struct tjournal_da_node *left = node->left;
+
+				// find right most node
 				if (left->right) {
 					struct tjournal_da_node *most, *prev;
+					tj_debug(
+						"left_child(%lu, %u) has right(%lu, %u)\n",
+						left->start, left->len,
+						left->right->start,
+						left->right->len);
 
 					most = most_node(left, &prev);
 					if (most != left &&
-					    most->start + most->len - 1 ==
+					    most->start + most->len ==
 						    node->start) {
 						node->start = most->start;
 						node->len += most->len;
-						prev->right = NULL;
+						prev->right = most->left;
+						tj_debug(
+							"most_node(%lu, %u) merged to parent(%lu, %u)\n",
+							most->start, most->len,
+							node->start, node->len);
 						kfree(most);
 						return;
 					}
 				}
 
-				/* Direct merge with left node */
-				if (left->start + left->len - 1 ==
-				    node->start) {
+				if (left->start + left->len == node->start) {
+					tj_debug(
+						"left_child(%lu, %u) merged to parent(%lu, %u)\n",
+						left->start, left->len,
+						node->start, node->len);
 					BUG_ON(left->right);
 					node->start = left->start;
 					node->len += left->len;
@@ -510,37 +554,58 @@ static void __insert_da_node(struct tjournal_da_node *node, pgoff_t index)
 			}
 		}
 		/* Make left node if not exist */
-		else if (!node->left)
+		else if (!node->left) {
+			tj_debug(
+				"create new node(%lu, 1) as left child of node(%lu, %d)\n",
+				index, node->start, node->len);
 			node->left = create_da_node(index, 1);
-		else
+		} else
 			__insert_da_node(node->left, index);
 	}
 
 	/* Index is bigger than this node */
-	if (index > node->start + node->len - 1) {
+	else {
 		/* Direct merge with right node */
 		if (index == node->start + node->len) {
-			struct tjournal_da_node *right = node->right;
+			tj_debug(
+				"Page(%lu) be merged with node(%lu, %d)_right\n",
+				index, node->start, node->len);
 			node->len++;
 
-			if (right) {
+			/* check child can be merged */
+			if (node->right) {
+				struct tjournal_da_node *right = node->right;
+
+				// find left least node
 				if (right->left) {
 					struct tjournal_da_node *least, *prev;
+					tj_debug(
+						"right_child(%lu, %u) has left(%lu, %u)\n",
+						right->start, right->len,
+						right->left->start,
+						right->left->len);
 
 					least = least_node(right, &prev);
 					if (least != right &&
-					    node->start + node->len - 1 ==
+					    node->start + node->len ==
 						    least->start) {
 						node->len += least->len;
-						prev->left = NULL;
+						prev->left = least->right;
+						tj_debug(
+							"least_node(%lu, %u) merged to parent(%lu, %u)\n",
+							least->start,
+							least->len, node->start,
+							node->len);
 						kfree(least);
 						return;
 					}
 				}
 
-				/* Direct merge with right node */
-				if (node->start + node->len - 1 ==
-				    right->start) {
+				if (node->start + node->len == right->start) {
+					tj_debug(
+						"right_child(%lu, %u) merged to parent(%lu, %u)\n",
+						right->start, right->len,
+						node->start, node->len);
 					BUG_ON(right->left);
 					node->len += right->len;
 					node->right = right->right;
@@ -550,9 +615,12 @@ static void __insert_da_node(struct tjournal_da_node *node, pgoff_t index)
 			}
 		}
 		/* Make right node if not exist */
-		else if (!node->right)
+		else if (!node->right) {
+			tj_debug(
+				"create new node(%lu, 1) as right child of node(%lu, %d)\n",
+				index, node->start, node->len);
 			node->right = create_da_node(index, 1);
-		else
+		} else /* lets do next iterative */
 			__insert_da_node(node->right, index);
 	}
 }
@@ -560,6 +628,7 @@ static void __insert_da_node(struct tjournal_da_node *node, pgoff_t index)
 static void __insert_da_journalled(struct tjournal_da_tree *tree, pgoff_t index)
 {
 	spin_lock(&tree->lock);
+	tjk_debug("push index(%lu)\n", index);
 	if (!tree->root)
 		tree->root = create_da_node(index, 1);
 	else
@@ -576,33 +645,97 @@ void insert_da_journalled(struct inode *inode, unsigned long index)
 static struct tjournal_da_node *find_node(struct tjournal_da_node *node,
 					  unsigned long index)
 {
+	struct tjournal_da_node *ret = NULL;
+
 	if (!node)
-		return NULL;
+		return ret;
 
 	/* Check this node contains the requested index */
 	if (index >= node->start && index < node->start + node->len)
 		return node;
 
-	if (index < node->start)
-		return find_node(node->left, index);
+	if (index < node->start) {
+		ret = find_node(node->left, index);
+		if (ret)
+			return ret;
+	}
 
 	return find_node(node->right, index);
 }
 
-static int __lookup_da_journalled(struct tjournal_da_tree *tree, pgoff_t index,
+static struct tjournal_da_node *
+__find_node_with_prev(struct tjournal_da_node *node,
+		      struct tjournal_da_node **prev, unsigned long index)
+{
+	/* Check this node contains the requested index */
+	if (index >= node->start && index < node->start + node->len)
+		return node;
+
+	if (index < node->start && node->left) {
+		*prev = node;
+		return __find_node_with_prev(node->left, prev, index);
+	} else if (index > (node->start + node->len - 1) && node->right) {
+		*prev = node;
+		return __find_node_with_prev(node->right, prev, index);
+	}
+
+	if (index < node->start)
+		*prev = node;
+
+	return NULL;
+}
+
+static struct tjournal_da_node *
+find_node_with_prev(struct tjournal_da_node *node,
+		    struct tjournal_da_node **prev, unsigned long index)
+{
+	struct tjournal_da_node *ret = NULL;
+
+	/* Check this node contains the requested index */
+	if (index >= node->start && index < node->start + node->len)
+		return node;
+
+	*prev = node;
+	if (index < node->start && node->left) {
+		ret = __find_node_with_prev(node->left, prev, index);
+		if (ret)
+			return ret;
+
+		/* We have next index in left subtree */
+		if ((*prev)->start > index)
+			return NULL;
+	}
+
+	*prev = node;
+	if (index > node->start && node->right) {
+		ret = __find_node_with_prev(node->right, prev, index);
+		if (ret)
+			return ret;
+	}
+	return NULL;
+}
+
+static int __lookup_da_journalled(struct tjournal_da_tree *tree, pgoff_t *index,
 				  unsigned int *len)
 {
-	struct tjournal_da_node *node = NULL;
+	struct tjournal_da_node *prev, *node;
+	node = prev = NULL;
 
 	spin_lock(&tree->lock);
-	node = find_node(tree->root, index);
+	node = find_node_with_prev(tree->root, &prev, *index);
 	spin_unlock(&tree->lock);
 
-	if (!node)
+	if (!node) {
+		*index = (*index < prev->start) ? prev->start : (pgoff_t)-1;
+		*len = 0;
+		tj_debug(" (%s) NOT found next index(%lu)\n", __func__, *index);
 		return 0;
+	}
 
-	*len = node->start - index + node->len;
-	// tjk_debug("index(%lu) len(%u) done\n", index, *len);
+	/* next index will be modified by pagevec_lookup_range_tag() */
+	*len = node->start - *index + node->len;
+	tj_debug(" (%s) index(%lu) found node(%lu, %u)\n", __func__, *index,
+		 node->start, node->len);
 	return 1;
 }
 
@@ -612,20 +745,26 @@ static int __lookup_da_journalled(struct tjournal_da_tree *tree, pgoff_t index,
  * @param len (extent length started from index)
  * @return 0: not found, 1: found
  */
-int lookup_da_journalled(struct inode *inode, pgoff_t index, unsigned int *len)
+int lookup_da_journalled(struct inode *inode, pgoff_t *index, unsigned int *len)
 {
 	struct ext4_inode_info *ei = EXT4_I(inode);
+
+	/* nothing on this file */
+	if (ei->i_journalled_da_tree.root == NULL) {
+		*index = (pgoff_t)-1;
+		*len = 0;
+		return 0;
+	}
+
 	return __lookup_da_journalled(&ei->i_journalled_da_tree, index, len);
 }
 
-static int __truncate_da_journalled(struct tjournal_da_tree *tree,
-				    pgoff_t start, unsigned int len)
+static int __delete_da_journalled(struct tjournal_da_tree *tree, pgoff_t start,
+				  unsigned int len)
 {
 	struct tjournal_da_node *node = NULL;
 	pgoff_t end = start + len;
 	int ret = 0;
-
-	tjk_debug("start: %lu, len: %u\n", start, len);
 
 	spin_lock(&tree->lock);
 	node = find_node(tree->root, start);
@@ -699,12 +838,75 @@ static int __truncate_da_journalled(struct tjournal_da_tree *tree,
 
 unlock:
 	spin_unlock(&tree->lock);
+	// if (tree->root)
+	// 	tj_debug("ret(%d) root(%lu, %u)\n", ret ,tree->root->start, tree->root->len);
+	// else
+	// 	tj_debug("ret(%d) no delayed allocation states\n", ret);
+
+	if (ret < 0)
+		BUG(); /* TODO */
+
 	return ret;
 }
 
-int truncate_da_journalled(struct inode *inode, pgoff_t start, unsigned int len)
+int delete_da_journalled(struct inode *inode, pgoff_t start, unsigned int len)
 {
 	struct ext4_inode_info *ei = EXT4_I(inode);
-	return __truncate_da_journalled(&ei->i_journalled_da_tree, start, len);
+	return __delete_da_journalled(&ei->i_journalled_da_tree, start, len);
 }
+
+static void free_da_journalled(struct tjournal_da_node *node)
+{
+	if (!node)
+		return;
+
+	if (node->left)
+		free_da_journalled(node->left);
+	if (node->right)
+		free_da_journalled(node->right);
+
+	kfree(node);
+}
+
+static struct tjournal_da_node *
+__truncate_da_journalled(struct tjournal_da_node *node, pgoff_t start)
+{
+	if (!node)
+		return NULL;
+
+	if (node->start > start) {
+		free_da_journalled(node);
+		return NULL;
+	}
+
+	if (node->start <= start && node->start + node->len > start) {
+		node->len = start - node->start;
+		if (node->right) {
+			free_da_journalled(node->right);
+			node->right = NULL;
+		}
+		return node;
+	}
+
+	node->left = __truncate_da_journalled(node->left, start);
+	node->right = __truncate_da_journalled(node->right, start);
+
+	return node;
+}
+
+/**
+ * @brief truncate da_tree from start (inclusive)
+ *
+*/
+int truncate_da_journalled(struct inode *inode, pgoff_t start)
+{
+	struct ext4_inode_info *ei = EXT4_I(inode);
+	struct tjournal_da_tree *tree = &ei->i_journalled_da_tree;
+
+	spin_lock(&tree->lock);
+	tree->root = __truncate_da_journalled(tree->root, start);
+	spin_unlock(&tree->lock);
+	return 0;
+}
+
 #endif /* CONFIG_EXT4_TAU_JOURNALING */

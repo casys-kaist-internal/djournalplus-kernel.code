@@ -1825,6 +1825,20 @@ static void mpage_release_unused_pages(struct mpage_da_data *mpd,
 						folio_size(folio));
 				folio_clear_uptodate(folio);
 			}
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+			/* unused buffers in tau-journaling make taudirty */
+			if (ext4_should_journal_plus(inode)) {
+				struct buffer_head *head, *bh;
+				head = folio_buffers(folio);
+				bh = head;
+				do {
+					if (buffer_dirty(bh)) {
+						set_buffer_taudirty(bh);
+						clear_buffer_dirty(bh);
+					}
+				} while ((bh = bh->b_this_page) != head);
+			}
+#endif
 			folio_unlock(folio);
 		}
 		folio_batch_release(&fbatch);
@@ -3535,58 +3549,16 @@ static unsigned tjournal_lookup_da_range(struct pagevec *pvec,
 					 pgoff_t end)
 {
 	struct address_space *mapping = inode->i_mapping;
-	struct folio_batch fbatch;
-	unsigned int cnt, len = 0;
-	unsigned nr, i, ret = 0;
+	unsigned int len = 0;
+	unsigned ret = 0;
+	// tjk_debug("Inode(%lu) start(%lu) end(%d).\n", inode->i_ino, *index, (int)end);
 
-	tjk_debug("Inode(%lu) start(%lu) end(%d).\n", inode->i_ino, *index, (int)end);
-
-	cnt = 0;
-	folio_batch_init(&fbatch);
-	while ((ret = lookup_da_journalled(inode, *index, &len))) {
-		if (len > PAGEVEC_SIZE - cnt)
-			len = PAGEVEC_SIZE - cnt;
-
-		tj_debug("Found start(%lu) len(%d).\n", *index, len);
-		nr = filemap_get_folios(mapping, index, *index + len - 1,
-					&fbatch);
-		if (nr == 0) {
-			pr_err("failed to get folios");
-			break;
-		}
-
-		for (i = 0; i < nr; i++) {
-			struct folio *folio = fbatch.folios[i];
-			pvec->pages[cnt] = &folio->page;
-			cnt++;
-
-			if (cnt == PAGEVEC_SIZE) {
-				*index = folio->index + folio_nr_pages(folio);
-				folio_batch_release(&fbatch);
-				goto out;
-			}
-		}
-		*index += len;
-		folio_batch_release(&fbatch);
-	}
-
-	if (ret < 0) {
-		pr_err("lookup_da_journalled failed\n");
+	ret = lookup_da_journalled(inode, index, &len);
+	if (!ret)
 		return ret;
-	}
 
-	/*
-	 * We come here when we got to @end. We take care to not overflow the
-	 * index @index as it confuses some of the callers. This breaks the
-	 * iteration when there is a page at index -1 but that is already
-	 * broken anyway.
-	 */
-	if (end == (pgoff_t)-1)
-		*index = (pgoff_t)-1;
-
-out:
-	tj_debug("cnt(%d) next index(%d)\n",cnt, (int)*index);
-	return cnt;
+	return pagevec_lookup_range_tag(pvec, mapping, index, *index + len - 1,
+					 XA_PRESENT);
 }
 
 /* based on mpage_prepare_extent_to_map() */
@@ -3603,25 +3575,28 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 	int blkbits = mpd->inode->i_blkbits;
 	ext4_lblk_t lblk;
 
-	tjk_debug("inode(%lu) nr_pages(%ld)\n", inode->i_ino,
-		  inode->i_mapping->nrpages);
-
 	pagevec_init(&pvec);
 	mpd->map.m_len = 0;
 	mpd->next_page = index;
 	while (index <= end) {
-		tj_debug("inside loop(%lu) end(%d)\n", index, (int)end);
 		nr_pages = tjournal_lookup_da_range(&pvec, inode, &index, end);
-		if (nr_pages == 0)
+		if (nr_pages == 0) {
+			if (!mpd->map.m_len && index != (pgoff_t)-1)
+				continue; /* until end of file */
+			mpd->next_page = index;
 			break;
+		}
 
 		for (i = 0; i < nr_pages; i++) {
 			struct page *page = pvec.pages[i];
 
 			// PRINT_PAGE_FLAGS_COMPACT(page);
 			/* If we can't merge this page, we are done. */
-			if (mpd->map.m_len > 0 && mpd->next_page != page->index)
+			if (mpd->map.m_len > 0 && mpd->next_page != page->index) {
+				tj_debug("not contiguous(%lu) expected(%lu), nr_pages(%u), map_len(%d)\n",
+					  page->index, mpd->next_page, nr_pages, mpd->map.m_len);
 				goto out;
+			}
 
 			lock_page(page);
 
@@ -3634,6 +3609,7 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 			/* If this page is handling transaction, wait for it done */
 			if (PageGrabTxHandle(page)) {
 				unlock_page(page);
+				tj_debug("wait for txhandle\n");
 				folio_wait_txhandle(page_folio(page));
 				lock_page(page);
 			}
@@ -3645,8 +3621,10 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 			}
 
 			/* mpd structs stacks un-allocated contiguous pages */
-			if (mpd->map.m_len == 0) // now start
+			if (mpd->map.m_len == 0) { // now start
 				mpd->first_page = page->index;
+				// tj_debug("first page(%lu)\n", page->index);
+			}
 			mpd->next_page = page->index + 1;
 			/*
 			 * Writeout for transaction commit where we cannot
@@ -3664,13 +3642,19 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 				BUG_ON(!buffer_taudirty(bh));
 				BUG_ON(!buffer_delay(bh)); // must be delayed
 				clear_buffer_taudirty(bh);
-				set_buffer_dirty(bh);
+				set_buffer_dirty(bh); // we can add to extent if it is dirty
 			} while ((bh = bh->b_this_page) != head);
 
 			/* If died here, check dependency of folio_lock */
 			err = mpage_process_page_bufs(mpd, head, head, lblk);
-			if (err <= 0)
+			if (err <= 0) {
+				/* unused pages will be unlocked in mpage_release_unused_pages()
+				 * only revirt the buffer state */
+				set_buffer_taudirty(bh);
+				clear_buffer_dirty(bh);
+				tj_debug("mpage_process_page_bufs ret(%d) pvec.nr(%d)\n", err, pvec.nr);
 				goto out;
+			}
 
 			err = 0;
 			left--;
@@ -3678,12 +3662,16 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 		pagevec_release(&pvec);
 		cond_resched();
 	}
+	tj_debug("(%s) mpd_first(%lu)/next(%lu) len(%d)\n",
+		__func__, mpd->first_page, mpd->next_page, mpd->map.m_len);
 	mpd->scanned_until_end = 1;
 	return 0;
 out:
 	pagevec_release(&pvec);
 	if (err)
 		pr_err("Error(%d) in tjournal_prepare_extent_to_map\n", err);
+	tj_debug(" [%s] mpd_first(%lu)/next(%lu) len(%d)\n",
+		__func__, mpd->first_page, mpd->next_page, mpd->map.m_len);
 	return err;
 }
 
@@ -3708,9 +3696,11 @@ static int tjournal_do_writepages(struct mpage_da_data *mpd)
 
 	/* If there is nothing to checkpoint, this function might not be called ... */
 	if (!mapping->nrpages || !has_da_journalled(inode)) {
-		pr_warn("Nothing to chkpt nr: %ld\n", mapping->nrpages);
+		tj_warn("Nothing to checkpoint nr(%ld)\n", mapping->nrpages);
 		goto out_writepages;
 	}
+	// tj_debug("... checking the delayed states\n");
+	// print_tjournal_da_tree_all(inode);
 
 	if (unlikely(ext4_forced_shutdown(EXT4_SB(mapping->host->i_sb)) ||
 		     ext4_test_mount_flag(inode->i_sb, EXT4_MF_FS_ABORTED))) {
@@ -3737,6 +3727,8 @@ static int tjournal_do_writepages(struct mpage_da_data *mpd)
 	mpd->last_page = wbc->range_end >> PAGE_SHIFT;
 	mpd->scanned_until_end = 0;
 	while (!mpd->scanned_until_end && wbc->nr_to_write > 0) {
+		tjk_debug("Loop start first page(%lu) last page(%lu) map.len(%u)\n",
+				mpd->first_page, mpd->last_page, mpd->map.m_len);
 		/* For each extent of pages we use new io_end */
 		mpd->io_submit.io_end = ext4_init_io_end(inode, GFP_KERNEL);
 		if (!mpd->io_submit.io_end) {
@@ -3769,17 +3761,27 @@ static int tjournal_do_writepages(struct mpage_da_data *mpd)
 		}
 		mpd->do_map = 1;
 
-		ret = tjournal_prepare_extent_to_map(mpd);
-		if (!ret)
-			truncate_da_journalled(inode, mpd->map.m_lblk, mpd->map.m_len);
-
 		/* mpd->map value will change: len --> 0, pblock --> allocated */
-		if (!ret && mpd->map.m_len)
+		ret = tjournal_prepare_extent_to_map(mpd);
+		if (!ret && mpd->map.m_len) {
+			tj_debug("map_and_submit_extent start(%u) len(%d) first(%lu)\n",
+					mpd->map.m_lblk, mpd->map.m_len, mpd->first_page);
 			ret = mpage_map_and_submit_extent(handle, mpd,
 							  &give_up_on_write);
+			if (give_up_on_write)
+				tj_warn("give up on write\n");
+			if (ret < 0)
+				pr_err("mpage_map_and_submit_extent ret(%d)\n", ret);
+			/* extent can be different from our request on map_and_submit 
+			 * we must handle truncate_da after do submit extents and data */
+			if (delete_da_journalled(inode, mpd->map.m_lblk,
+							mpd->first_page - mpd->map.m_lblk) < 0)
+				pr_err("delete_da_journalled failed\n");
+		}
 
 		/* We can stop handle here, since we are not using metadata journaling
 		 * Data will be exist in journal area so that no risk to loss data */
+		ext4_put_io_end_defer(mpd->io_submit.io_end);
 		ext4_journal_stop(handle);
 
 		/* We need to */
@@ -3789,6 +3791,7 @@ static int tjournal_do_writepages(struct mpage_da_data *mpd)
 		/* Unlock pages we didn't use and submit remains bio */
 		mpage_release_unused_pages(mpd, give_up_on_write);
 		ext4_io_submit(&mpd->io_submit);
+		mpd->io_submit.io_end = NULL;
 
 		if (ret == -ENOSPC && sbi->s_journal) {
 			/*
@@ -4267,8 +4270,10 @@ static bool ext4_release_folio(struct folio *folio, gfp_t wait)
 	trace_ext4_releasepage(&folio->page);
 
 #ifdef CONFIG_EXT4_TAU_JOURNALING
-	if (journal && journal->j_flags & JBD2_EXT4_JOURNAL_PLUS)
+	if (journal && journal->j_flags & JBD2_EXT4_JOURNAL_PLUS) {
+		tj_warn("try to free buffers\n");
 		return tjournal_try_to_free_buffers(folio);
+	}
 #endif
 	/* Page has dirty journalled data -> cannot release */
 	if (folio_test_checked(folio))
@@ -6552,6 +6557,12 @@ int ext4_setattr(struct user_namespace *mnt_userns, struct dentry *dentry,
 			}
 		}
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+		if (ext4_should_journal_plus(inode)) {
+			truncate_da_journalled(inode, DIV_ROUND_UP(inode->i_size,
+							 PAGE_SIZE));
+		}
+#endif
 		/*
 		 * Truncate pagecache after we've waited for commit
 		 * in data=journal mode to make pages freeable.

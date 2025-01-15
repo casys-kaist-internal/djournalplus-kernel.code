@@ -312,7 +312,7 @@ __must_hold(&journal->j_state_lock)
 	if (journal->j_flags & JBD2_EXT4_JOURNAL_PLUS &&
 		 (jbd2_log_space_left(journal) / journal->j_total_len) <
 	    journal->j_checkpoint_threshold) {
-		pr_debug("wake up checkpointer\n");
+		tjk_debug("wake up checkpointer\n");
 		wake_up(&journal->j_wait_checkpoint);
 	}
 #endif
@@ -2125,10 +2125,10 @@ static void __jbd2_journal_temp_unlink_buffer(struct journal_head *jh)
 			else {
 				/* This buffer is not allocated yet */
 				if (buffer_delay(bh)) {
-					tj_debug("delayed block\n");
+					// tj_debug("delayed block\n");
 					insert_da_journalled(inode, page->index);
 				}
-				tj_debug("set dirty\n");
+				// tj_debug("set dirty\n");
 				set_buffer_taudirty(bh);
 			}
 		} else
