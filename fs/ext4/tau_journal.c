@@ -200,7 +200,9 @@ restart:
 			spin_unlock(&journal->j_list_lock);
 			BUG_ON(delayed == bh->b_page->index);
 			BUG_ON(bh->b_page->mapping == NULL);
+			mutex_unlock(&journal->j_checkpoint_mutex);
 			tjournal_writepages(bh->b_page->mapping);
+			mutex_lock_io(&journal->j_checkpoint_mutex);
 			// TODO: error handling
 			delayed = bh->b_page->index;
 			__brelse(bh);
@@ -303,7 +305,7 @@ restart2:
 		if (__jbd2_journal_remove_checkpoint(jh))
 			break;
 	}
-
+	tj_debug("All checkpoint list done\n");
 out:
 	spin_unlock(&journal->j_list_lock);
 	result = jbd2_cleanup_journal_tail(journal);
