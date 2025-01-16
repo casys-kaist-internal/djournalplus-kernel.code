@@ -831,13 +831,13 @@ EXPORT_SYMBOL(copy_page_from_iter_atomic);
 size_t copy_page_from_iter_atomic_kern(struct page *page, unsigned offset, size_t bytes,
 					  struct iov_iter *i, const char *data)
 {
-	char *kaddr = kmap_atomic(page), *p = kaddr + offset;
+	char *kaddr = kmap_local_page(page), *p = kaddr + offset;
 	if (!page_copy_sane(page, offset, bytes)) {
-		kunmap_atomic(kaddr);
+		kunmap_local(kaddr);
 		return 0;
 	}
 	if (WARN_ON_ONCE(!i->data_source)) {
-		kunmap_atomic(kaddr);
+		kunmap_local(kaddr);
 		return 0;
 	}
 
@@ -849,7 +849,7 @@ size_t copy_page_from_iter_atomic_kern(struct page *page, unsigned offset, size_
 		i->count -= bytes;
 	}
 
-	kunmap_atomic(kaddr);
+	kunmap_local(kaddr);
 	return bytes;
 }
 EXPORT_SYMBOL(copy_page_from_iter_atomic_kern);
