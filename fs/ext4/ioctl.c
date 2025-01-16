@@ -1216,13 +1216,34 @@ static int ext4_ioctl_setuuid(struct file *filp,
 
 #ifdef CONFIG_EXT4_TAU_JOURNALING
 static int ext4_ioc_start_atomic_write(struct file *filep) {
-	ext4_journal_start(file_inode(filep), EXT4_HT_WRITE_PAGE, 128);
+	struct inode *inode = filep->f_inode;
+	struct ext4_inode_info *ei = EXT4_I(inode);
+
+	ext4_set_inode_flag(filep->f_inode, EXT4_STATE_ATOMIC_FILE);
+
+	// initialize tjournal_atomic_master
+	BUG_ON(ei->i_atomic_master.fsize || ei->i_atomic_master.head);
+	ei->i_atomic_master.fsize = inode->i_size;
+
 	return 0;
 }
 static int ext4_ioc_commit_atomic_write(struct file *filep) {
-	handle_t *handle = journal_current_handle();
-	BUG_ON(!handle);
-	ext4_journal_stop(handle);
+	struct inode *inode = filep->f_inode;
+	struct ext4_inode_info *ei = EXT4_I(inode);
+	struct tjournal_atomic_log *cur, *next;
+
+	ext4_clear_inode_flag(inode, EXT4_STATE_ATOMIC_FILE);
+
+	/* TODO: write these logs and adjust fsize before free */
+	for (cur = ei->i_atomic_master.head; cur; cur = next) {
+		next = cur->next;
+		kfree(cur->data);
+		kfree(cur);
+	}
+
+	ei->i_atomic_master.fsize = 0;
+	ei->i_atomic_master.head = NULL;
+
 	return 0;
 }
 static int ext4_ioc_get_features(struct file *filep, unsigned long arg) {
@@ -1626,8 +1647,12 @@ resizefs_out:
 #ifdef CONFIG_EXT4_TAU_JOURNALING
 	/* not implemented */
 	case EXT4_IOC_START_ATOMIC_WRITE:
+		if (!inode_owner_or_capable(mnt_userns, inode))
+			return -EACCES;
 		return ext4_ioc_start_atomic_write(filp);
 	case EXT4_IOC_COMMIT_ATOMIC_WRITE:
+		if (!inode_owner_or_capable(mnt_userns, inode))
+			return -EACCES;
 		return ext4_ioc_commit_atomic_write(filp);
 	case EXT4_IOC_ABORT_ATOMIC_WRITE:
 		return -ENOTTY;

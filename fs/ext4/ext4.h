@@ -1039,6 +1039,18 @@ struct tjournal_da_tree {
     struct tjournal_da_node *root;
     spinlock_t lock;
 };
+
+struct tjournal_atomic_master {
+	size_t fsize;
+	struct tjournal_atomic_log *head;
+};
+struct tjournal_atomic_log {
+	loff_t disp;
+	loff_t offset;
+	size_t len;
+	void *data;
+	struct tjournal_atomic_log *next;
+};
 #endif
 
 /*
@@ -1107,6 +1119,7 @@ struct ext4_inode_info {
 
 #ifdef CONFIG_EXT4_TAU_JOURNALING
 	struct tjournal_da_tree i_journalled_da_tree;
+	struct tjournal_atomic_master i_atomic_master;
 #endif
 	/*
 	 * i_disksize keeps track of what the inode size is ON DISK, not
@@ -1931,6 +1944,9 @@ enum {
 	EXT4_STATE_VERITY_IN_PROGRESS,	/* building fs-verity Merkle tree */
 	EXT4_STATE_FC_COMMITTING,	/* Fast commit ongoing */
 	EXT4_STATE_ORPHAN_FILE,		/* Inode orphaned in orphan file */
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	EXT4_STATE_ATOMIC_FILE,		/* Atomic file */
+#endif
 };
 
 #define EXT4_INODE_BIT_FNS(name, field, offset)				\

@@ -132,6 +132,13 @@ static ssize_t ext4_dax_read_iter(struct kiocb *iocb, struct iov_iter *to)
 static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
+	ssize_t ret;
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	struct ext4_inode_info *ei = EXT4_I(inode);
+	struct tjournal_atomic_log *cur;
+	loff_t offset = iocb->ki_pos, kdisp, udisp;
+	size_t n, len = to->count;
+#endif
 
 	if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb))))
 		return -EIO;
@@ -146,7 +153,45 @@ static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	if (iocb->ki_flags & IOCB_DIRECT)
 		return ext4_dio_read_iter(iocb, to);
 
-	return generic_file_read_iter(iocb, to);
+	ret = generic_file_read_iter(iocb, to);
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	if (ext4_test_inode_flag(inode, EXT4_STATE_ATOMIC_FILE)) {
+		inode_lock_shared(inode);
+		if (offset + len > inode->i_size && inode->i_size < ei->i_atomic_master.fsize) {
+			n = min(ei->i_atomic_master.fsize, (size_t)offset + len) - max(inode->i_size, offset);
+			if (clear_user(to->ubuf + ret, n)) {
+				ret = -EFAULT;
+				goto end_atomic_read;
+			}
+			ret += n;
+		}
+		cur = ei->i_atomic_master.head;
+		while (cur) {
+			// copy data to user space
+			if (cur->offset + cur->len <= offset) {
+				cur = cur->next;
+				continue;
+			}
+			if (cur->offset >= offset + len)
+				break;
+			kdisp = cur->disp;
+			udisp = 0;
+			if (cur->offset < offset)
+				kdisp += offset - cur->offset;
+			else
+				udisp = cur->offset - offset;
+			n = min(cur->offset + cur->len, offset + len) - max(cur->offset, offset);
+			if (copy_to_user(to->ubuf + udisp, cur->data + kdisp, n)) {
+				ret = -EFAULT;
+				goto end_atomic_read;
+			}
+			cur = cur->next;
+		}
+end_atomic_read:
+		inode_unlock_shared(inode);
+	}
+#endif
+	return ret;
 }
 
 /*
@@ -370,6 +415,103 @@ static ssize_t ext4jp_buffered_write_iter(struct kiocb *iocb,
 	ssize_t ret;
 	int needed_blocks, nr_blks;
 	unsigned int block_size;
+	struct ext4_inode_info *ei = EXT4_I(inode);
+	struct tjournal_atomic_log *cur, *new = NULL, *prev = NULL, *tmp;
+	loff_t offset = iocb->ki_pos;
+	size_t len = from->count;
+
+	if (ext4_test_inode_flag(inode, EXT4_STATE_ATOMIC_FILE)) {
+		cur = ei->i_atomic_master.head;
+		while (cur) {
+			// traverse and remove overlap logs
+			if (cur->offset + cur->len <= offset) {
+				prev = cur;
+				cur = cur->next;
+				continue;
+			}
+			if (cur->offset >= offset + len) {
+				break;
+			}
+			if (cur->offset <= offset && cur->offset + cur->len >= offset + len) {
+				BUG_ON(new);
+				if (copy_from_user(cur->data + cur->disp + offset - cur->offset, from->ubuf, len))
+					return -EFAULT;
+				return len;
+			}
+			if (!new) {
+				new = kmalloc(sizeof(struct tjournal_atomic_log), GFP_KERNEL);
+				if (new == NULL)
+					return -ENOMEM;
+				new->data = kmalloc(len, GFP_KERNEL);
+				if (new->data == NULL) {
+					kfree(new);
+					return -ENOMEM;
+				}
+				new->disp = 0;
+				new->offset = offset;
+				new->len = len;
+				if (copy_from_user(new->data, from->ubuf, len)) {
+					kfree(new->data);
+					kfree(new);
+					return -EFAULT;
+				}
+			}
+			if (cur->offset + cur->len <= offset + len) {
+				if (cur->offset >= offset) {
+					tmp = cur;
+					cur = cur->next;
+					if (prev)
+						prev->next = cur;
+					else
+						ei->i_atomic_master.head = cur;
+					kfree(tmp->data);
+					kfree(tmp);
+					continue;
+				}
+				else {
+					cur->len = offset - cur->offset;
+					prev = cur;
+					cur = cur->next;
+					continue;
+				}
+			}
+			cur->disp += offset + len - cur->offset;
+			cur->len -= offset + len - cur->offset;
+			cur->offset = offset + len;
+			break;
+		}
+		if (!new) {
+			new = kmalloc(sizeof(struct tjournal_atomic_log), GFP_KERNEL);
+			if (new == NULL)
+				return -ENOMEM;
+			new->data = kmalloc(len, GFP_KERNEL);
+			if (new->data == NULL) {
+				kfree(new);
+				return -ENOMEM;
+			}
+			new->disp = 0;
+			new->offset = offset;
+			new->len = len;
+			if (copy_from_user(new->data, from->ubuf, len)) {
+				kfree(new->data);
+				kfree(new);
+				return -EFAULT;
+			}
+		}
+		if (prev) {
+			BUG_ON(prev->next != cur);
+			new->next = cur;
+			prev->next = new;
+		}
+		else {
+			BUG_ON(ei->i_atomic_master.head != cur);
+			new->next = ei->i_atomic_master.head;
+			ei->i_atomic_master.head = new;
+		}
+		if (offset + len > ei->i_atomic_master.fsize)
+			ei->i_atomic_master.fsize = offset + len;
+		return len;
+	}
 
 	/* Total data blocks */
 	block_size =  1 << inode->i_sb->s_blocksize_bits;
