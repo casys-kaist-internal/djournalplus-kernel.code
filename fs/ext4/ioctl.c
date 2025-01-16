@@ -1219,33 +1219,90 @@ static int ext4_ioc_start_atomic_write(struct file *filep) {
 	struct inode *inode = filep->f_inode;
 	struct ext4_inode_info *ei = EXT4_I(inode);
 
-	ext4_set_inode_flag(filep->f_inode, EXT4_STATE_ATOMIC_FILE);
+	inode_lock(inode);
+	if (ext4_test_inode_flag(inode, EXT4_STATE_ATOMIC_FILE))
+		goto end_start_atomic_write;
+
+	ext4_set_inode_flag(inode, EXT4_STATE_ATOMIC_FILE);
 
 	// initialize tjournal_atomic_master
 	BUG_ON(ei->i_atomic_master.fsize || ei->i_atomic_master.head);
 	ei->i_atomic_master.fsize = inode->i_size;
 
+end_start_atomic_write:
+	inode_unlock(inode);
+
 	return 0;
 }
+
 static int ext4_ioc_commit_atomic_write(struct file *filep) {
+	handle_t *handle;
+	struct inode *inode = filep->f_inode;
+	struct ext4_inode_info *ei = EXT4_I(inode);
+	struct tjournal_atomic_log *cur, *next;
+	int ret = 0;
+
+	inode_lock(inode);
+	if (!ext4_test_inode_flag(filep->f_inode, EXT4_STATE_ATOMIC_FILE))
+		goto end_commit_atomic_write;
+	ext4_clear_inode_flag(inode, EXT4_STATE_ATOMIC_FILE);
+
+	// TODO: calcuate actual needed blks;
+	handle = ext4_journal_start(inode, EXT4_HT_WRITE_PAGE, 1024);
+	if (IS_ERR(handle)) {
+		ret = PTR_ERR(handle);
+		goto end_commit_atomic_write;
+	}
+
+	/* write logs */
+	for (cur = ei->i_atomic_master.head; cur; cur = next) {
+		if (ext4jp_write_atomic_log(filep, cur->offset, (const char *)cur->data + cur->disp, cur->len) != cur->len) {
+			ext4_warning(inode->i_sb, "failed to write atomic log");
+			ret = -EIO;
+			goto end_commit_atomic_write;
+		}
+		next = cur->next;
+		kfree(cur->data);
+		kfree(cur);
+	}
+
+	ext4_journal_stop(handle);
+
+	BUG_ON(ei->i_atomic_master.fsize != inode->i_size);
+	ei->i_atomic_master.fsize = 0;
+	ei->i_atomic_master.head = NULL;
+
+end_commit_atomic_write:
+	inode_unlock(inode);
+	return ret;
+}
+
+static int ext4_ioc_abort_atomic_write(struct file *filep) {
 	struct inode *inode = filep->f_inode;
 	struct ext4_inode_info *ei = EXT4_I(inode);
 	struct tjournal_atomic_log *cur, *next;
 
+	inode_lock(inode);
+	if (!ext4_test_inode_flag(filep->f_inode, EXT4_STATE_ATOMIC_FILE))
+		goto end_abort_atomic_write;
 	ext4_clear_inode_flag(inode, EXT4_STATE_ATOMIC_FILE);
 
-	/* TODO: write these logs and adjust fsize before free */
+	/* free all logs */
 	for (cur = ei->i_atomic_master.head; cur; cur = next) {
 		next = cur->next;
 		kfree(cur->data);
 		kfree(cur);
 	}
 
+	BUG_ON(ei->i_atomic_master.fsize != inode->i_size);
 	ei->i_atomic_master.fsize = 0;
 	ei->i_atomic_master.head = NULL;
 
+end_abort_atomic_write:
+	inode_unlock(inode);
 	return 0;
 }
+
 static int ext4_ioc_get_features(struct file *filep, unsigned long arg) {
 	u32 features = 0;
 
@@ -1649,14 +1706,26 @@ resizefs_out:
 	case EXT4_IOC_START_ATOMIC_WRITE:
 		if (!inode_owner_or_capable(mnt_userns, inode))
 			return -EACCES;
+		if (!ext4_should_journal_plus(inode))
+			return -ENOTTY;
 		return ext4_ioc_start_atomic_write(filp);
 	case EXT4_IOC_COMMIT_ATOMIC_WRITE:
 		if (!inode_owner_or_capable(mnt_userns, inode))
 			return -EACCES;
+		if (!ext4_should_journal_plus(inode))
+			return -ENOTTY;
 		return ext4_ioc_commit_atomic_write(filp);
 	case EXT4_IOC_ABORT_ATOMIC_WRITE:
-		return -ENOTTY;
+		if (!inode_owner_or_capable(mnt_userns, inode))
+			return -EACCES;
+		if (!ext4_should_journal_plus(inode))
+			return -ENOTTY;
+		return ext4_ioc_abort_atomic_write(filp);
 	case EXT4_IOC_GET_FEATURES:
+		if (!inode_owner_or_capable(mnt_userns, inode))
+			return -EACCES;
+		if (!ext4_should_journal_plus(inode))
+			return -ENOTTY;
 		return ext4_ioc_get_features(filp, arg);
 #endif
 

@@ -827,6 +827,34 @@ size_t copy_page_from_iter_atomic(struct page *page, unsigned offset, size_t byt
 }
 EXPORT_SYMBOL(copy_page_from_iter_atomic);
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+size_t copy_page_from_iter_atomic_kern(struct page *page, unsigned offset, size_t bytes,
+					  struct iov_iter *i, const char *data)
+{
+	char *kaddr = kmap_atomic(page), *p = kaddr + offset;
+	if (!page_copy_sane(page, offset, bytes)) {
+		kunmap_atomic(kaddr);
+		return 0;
+	}
+	if (WARN_ON_ONCE(!i->data_source)) {
+		kunmap_atomic(kaddr);
+		return 0;
+	}
+
+	if (unlikely(i->count < bytes))
+		bytes = i->count;
+	if (likely(bytes)) {
+		memcpy(p, data + i->iov_offset, bytes);
+		i->iov_offset += bytes;
+		i->count -= bytes;
+	}
+
+	kunmap_atomic(kaddr);
+	return bytes;
+}
+EXPORT_SYMBOL(copy_page_from_iter_atomic_kern);
+#endif
+
 static void pipe_advance(struct iov_iter *i, size_t size)
 {
 	struct pipe_inode_info *pipe = i->pipe;

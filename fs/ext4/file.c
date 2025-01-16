@@ -181,7 +181,7 @@ static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 			else
 				udisp = cur->offset - offset;
 			n = min(cur->offset + cur->len, offset + len) - max(cur->offset, offset);
-			if (copy_to_user(to->ubuf + udisp, cur->data + kdisp, n)) {
+			if (copy_to_user(to->ubuf + udisp, (const char *)cur->data + kdisp, n)) {
 				ret = -EFAULT;
 				goto end_atomic_read;
 			}
@@ -317,7 +317,7 @@ static ssize_t ext4_write_checks(struct kiocb *iocb, struct iov_iter *from)
 #ifdef CONFIG_EXT4_TAU_JOURNALING
 /* based on generic_perform_write() */
 static ssize_t ext4jp_perform_write(struct kiocb *iocb, struct iov_iter *i,
-										struct page **pages)
+										struct page **pages, const void *data)
 {
 	struct file *file = iocb->ki_filp;
 	loff_t pos = iocb->ki_pos;
@@ -345,7 +345,7 @@ again:
 		 * same page as we're writing to, without it being marked
 		 * up-to-date.
 		 */
-		if (unlikely(fault_in_iov_iter_readable(i, bytes) == bytes)) {
+		if (unlikely(!data && fault_in_iov_iter_readable(i, bytes) == bytes)) {
 			status = -EFAULT;
 			break;
 		}
@@ -369,7 +369,10 @@ again:
 		if (mapping_writably_mapped(mapping))
 			flush_dcache_page(page);
 
-		copied = copy_page_from_iter_atomic(page, offset, bytes, i);
+		if (data)
+			copied = copy_page_from_iter_atomic_kern(page, offset, bytes, i, data);
+		else
+			copied = copy_page_from_iter_atomic(page, offset, bytes, i);
 		flush_dcache_page(page);
 
 		status = a_ops->write_end(file, mapping, pos, bytes, copied,
@@ -530,7 +533,7 @@ static ssize_t ext4jp_buffered_write_iter(struct kiocb *iocb,
 		return PTR_ERR(handle);
 
 	current->backing_dev_info = inode_to_bdi(inode);
-	ret = ext4jp_perform_write(iocb, from, pages);
+	ret = ext4jp_perform_write(iocb, from, pages, NULL);
 	current->backing_dev_info = NULL;
 
 #ifdef EXT4_JP_ALLOC_ON_COMMIT
@@ -544,6 +547,46 @@ static ssize_t ext4jp_buffered_write_iter(struct kiocb *iocb,
 	kfree(pages);
 	return ret;
 }
+
+ssize_t ext4jp_write_atomic_log(struct file *filep, loff_t offset, const void *data, size_t size) {
+	struct inode *inode = filep->f_inode;
+	struct page **pages;
+	ssize_t ret;
+	int nr_blks;
+	unsigned int block_size;
+	struct kiocb iocb;
+	struct iov_iter from;
+
+	init_sync_kiocb(&iocb, filep);
+	iocb.ki_pos = offset;
+	iov_iter_ubuf(&from, ITER_SOURCE, (void __user *)NULL, size);
+
+	/* Total data blocks */
+	block_size =  1 << inode->i_sb->s_blocksize_bits;
+	nr_blks = (offset % block_size + size + block_size - 1) / block_size;
+
+	/* Grab pages first in batch w/o locking */
+	pages = ext4jp_prepare_pages(inode, &iocb, nr_blks);
+	if (!pages)
+		return -ENOMEM;
+
+	current->backing_dev_info = inode_to_bdi(inode);
+	ret = ext4jp_perform_write(&iocb, &from, pages, data);
+	current->backing_dev_info = NULL;
+
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
+	// We do not consider alloc on commit for now.
+	BUG();
+#endif
+
+	kfree(pages);
+	if (likely(ret > 0)) {
+		iocb.ki_pos += ret;
+		ret = generic_write_sync(&iocb, ret);
+	}
+	return ret;
+}
+
 #endif /* CONFIG_EXT4_TAU_JOURNALING */
 
 static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
