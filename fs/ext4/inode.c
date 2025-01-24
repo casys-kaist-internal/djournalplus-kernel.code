@@ -1324,11 +1324,6 @@ retry_journal:
 					     do_journal_get_write_access);
 	}
 
-	if (PageDirty(page))
-		printk("[2]page dirty pos %llu len %d\n", pos, len);
-	else
-		printk("[2]page not dirty pos %llu len %d\n", pos, len);
-
 	if (ret) {
 		bool extended = (pos + len > inode->i_size) &&
 				!ext4_verity_in_progress(inode);
@@ -3579,12 +3574,18 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 	mpd->map.m_len = 0;
 	mpd->next_page = index;
 	while (index <= end) {
+		/* tjournal_lookup_da_range() returns contiguous delayed pages to map (in journal)
+		 * but maximum is limited to PAGEVEC_SIZE, so that it can be called multiple times */
 		nr_pages = tjournal_lookup_da_range(&pvec, inode, &index, end);
 		if (nr_pages == 0) {
-			if (!mpd->map.m_len && index != (pgoff_t)-1)
-				continue; /* until end of file */
-			mpd->next_page = index;
-			break;
+			if (index == (pgoff_t)-1)
+				break; // nothing to examine more
+
+			/* we still have */
+			if (!mpd->map.m_len)
+				continue; // no mpd yet
+			else
+				goto out; // no more contiguous on this extent
 		}
 
 		for (i = 0; i < nr_pages; i++) {
@@ -3662,16 +3663,12 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 		pagevec_release(&pvec);
 		cond_resched();
 	}
-	tj_debug("(%s) mpd_first(%lu)/next(%lu) len(%d)\n",
-		__func__, mpd->first_page, mpd->next_page, mpd->map.m_len);
 	mpd->scanned_until_end = 1;
 	return 0;
 out:
 	pagevec_release(&pvec);
 	if (err)
 		pr_err("Error(%d) in tjournal_prepare_extent_to_map\n", err);
-	tj_debug(" [%s] mpd_first(%lu)/next(%lu) len(%d)\n",
-		__func__, mpd->first_page, mpd->next_page, mpd->map.m_len);
 	return err;
 }
 
@@ -3727,8 +3724,7 @@ static int tjournal_do_writepages(struct mpage_da_data *mpd)
 	mpd->last_page = wbc->range_end >> PAGE_SHIFT;
 	mpd->scanned_until_end = 0;
 	while (!mpd->scanned_until_end && wbc->nr_to_write > 0) {
-		tjk_debug("Loop start first page(%lu) last page(%lu) map.len(%u)\n",
-				mpd->first_page, mpd->last_page, mpd->map.m_len);
+		tjk_debug("Loop start with page(%lu)\n", mpd->first_page);
 		/* For each extent of pages we use new io_end */
 		mpd->io_submit.io_end = ext4_init_io_end(inode, GFP_KERNEL);
 		if (!mpd->io_submit.io_end) {

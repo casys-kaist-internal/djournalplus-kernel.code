@@ -1376,6 +1376,9 @@ static journal_t *journal_init_common(struct block_device *bdev,
 #ifdef CONFIG_EXT4_TAU_JOURNALING
 	init_waitqueue_head(&journal->j_wait_checkpoint);
 	init_waitqueue_head(&journal->j_wait_done_checkpoint);
+	journal->j_checkpoint_threshold =
+		(unsigned long)len * TAU_CHECKPOINT_THRESHOLD / 100;
+	journal->j_requested_checkpoint = 0;
 #endif
 	mutex_init(&journal->j_abort_mutex);
 	mutex_init(&journal->j_barrier);

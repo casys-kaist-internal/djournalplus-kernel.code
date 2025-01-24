@@ -1162,7 +1162,8 @@ struct journal_s
 	wait_queue_head_t j_wait_checkpoint; /* to wake tjournald*/
 	wait_queue_head_t	j_wait_done_checkpoint; /* wait tjournald do its job done */
 	struct buffer_head	*tjournal_chkpt_bhs[JBD2_NR_BATCH];
-	unsigned int j_checkpoint_threshold; /* threshold in journal area for checkpoint */
+	unsigned long j_checkpoint_threshold; /* threshold in journal area for checkpoint */
+	unsigned long j_requested_checkpoint; /* requested checkpoint */
 #endif
 
 	/**

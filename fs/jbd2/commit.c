@@ -1304,7 +1304,7 @@ restart_loop:
 	wake_up(&journal->j_fc_wait);
 
 #ifdef CONFIG_EXT4_TAU_JOURNALING
-    tjk_debug("Finish commit Tx(%u): data blocks(%u)--%uKiB total blocks(%u).\n"
+    tjk_debug("Finish commit Tx(%u) data blocks(%u)--%uKiB total blocks(%u).\n"
            "     	 Journal area info: left blocks(%lu/%luMiB) total blocks(%d/%luMB).\n\n",
         commit_transaction->t_tid, stats.run.rs_blocks, (stats.run.rs_blocks * journal->j_blocksize) >> 10,
 		stats.run.rs_blocks_logged,

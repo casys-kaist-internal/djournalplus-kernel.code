@@ -114,11 +114,15 @@ __releases(&journal->j_state_lock)
 	nblocks = journal->j_max_transaction_buffers;
 #ifdef CONFIG_EXT4_TAU_JOURNALING
 	if (journal->j_flags & JBD2_EXT4_JOURNAL_PLUS) {
-		pr_info("Call tjournald due to lack of journal space\n");
+		tjk_debug("Call tjournald for checkpoint we need %d blocks\n", nblocks);
 		/* Is it possible that cannot wake up if no journal area? */
+		if (journal->j_requested_checkpoint < nblocks)
+			journal->j_requested_checkpoint = nblocks;
+		write_unlock(&journal->j_state_lock);
 		wake_up(&journal->j_wait_checkpoint);
 		wait_event(journal->j_wait_done_checkpoint,
 			 jbd2_log_space_left(journal) >= nblocks);
+		write_lock(&journal->j_state_lock);
 		return;
 	}
 #endif
