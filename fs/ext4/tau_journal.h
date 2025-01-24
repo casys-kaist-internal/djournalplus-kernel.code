@@ -4,6 +4,8 @@
 #include <linux/pagemap.h>
 #include <linux/jbd2.h>
 
+#define TAU_CHECKPOINT_THRESHOLD 50 // percent
+
 #define PG_GRAB_TXHANDLE \
 	PG_private_2 /* Page bit for joining transaction (grab handles) */
 
@@ -31,6 +33,7 @@ int tjournal_writepages(struct address_space *mapping);
 void tjournal_init_inode(struct inode *);
 bool tjournal_try_to_free_buffers(struct folio *);
 int tjournal_start_thread(journal_t *);
+int tjournal_need_checkpoint(journal_t *);
 
 /* Delayed allocation */
 void print_tjournal_da_tree_all(struct inode *);
