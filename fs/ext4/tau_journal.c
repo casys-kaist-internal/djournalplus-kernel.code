@@ -19,6 +19,7 @@ void tjournal_init_inode(struct inode *inode)
 
 	ei = EXT4_I(inode);
 	ei->i_journalled_da_tree.root = NULL;
+	memset(&ei->i_atomic_master, 0, sizeof(ei->i_atomic_master));
 	spin_lock_init(&ei->i_journalled_da_tree.lock);
 }
 

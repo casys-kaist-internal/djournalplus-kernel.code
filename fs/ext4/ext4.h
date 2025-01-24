@@ -725,6 +725,14 @@ enum {
 #define EXT4_IOC_GETFSUUID		_IOR('f', 44, struct fsuuid)
 #define EXT4_IOC_SETFSUUID		_IOW('f', 44, struct fsuuid)
 
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+/* support atomic write */
+#define EXT4_IOC_START_ATOMIC_WRITE	_IO('f', 45)
+#define EXT4_IOC_COMMIT_ATOMIC_WRITE	_IO('f', 46)
+#define EXT4_IOC_ABORT_ATOMIC_WRITE	_IO('f', 47)
+#define EXT4_IOC_GET_FEATURES		_IOR('f', 48, __u32)
+#endif
+
 #define EXT4_IOC_SHUTDOWN _IOR ('X', 125, __u32)
 
 /*
@@ -1031,6 +1039,18 @@ struct tjournal_da_tree {
     struct tjournal_da_node *root;
     spinlock_t lock;
 };
+
+struct tjournal_atomic_master {
+	size_t fsize;
+	struct tjournal_atomic_log *head;
+};
+struct tjournal_atomic_log {
+	loff_t disp;
+	loff_t offset;
+	size_t len;
+	void *data;
+	struct tjournal_atomic_log *next;
+};
 #endif
 
 /*
@@ -1099,6 +1119,7 @@ struct ext4_inode_info {
 
 #ifdef CONFIG_EXT4_TAU_JOURNALING
 	struct tjournal_da_tree i_journalled_da_tree;
+	struct tjournal_atomic_master i_atomic_master;
 #endif
 	/*
 	 * i_disksize keeps track of what the inode size is ON DISK, not
@@ -1923,6 +1944,9 @@ enum {
 	EXT4_STATE_VERITY_IN_PROGRESS,	/* building fs-verity Merkle tree */
 	EXT4_STATE_FC_COMMITTING,	/* Fast commit ongoing */
 	EXT4_STATE_ORPHAN_FILE,		/* Inode orphaned in orphan file */
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	EXT4_STATE_ATOMIC_FILE,		/* Atomic file */
+#endif
 };
 
 #define EXT4_INODE_BIT_FNS(name, field, offset)				\
@@ -2064,6 +2088,10 @@ static inline bool ext4_verity_in_progress(struct inode *inode)
 #define EXT4_FEATURE_INCOMPAT_INLINE_DATA	0x8000 /* data in inode */
 #define EXT4_FEATURE_INCOMPAT_ENCRYPT		0x10000
 #define EXT4_FEATURE_INCOMPAT_CASEFOLD		0x20000
+
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+#define EXT4_FEATURE_ATOMIC_WRITE		0x0004
+#endif
 
 extern void ext4_update_dynamic_rev(struct super_block *sb);
 
@@ -3568,6 +3596,8 @@ extern const struct file_operations ext4_dir_operations;
 /* file.c */
 extern const struct inode_operations ext4_file_inode_operations;
 extern const struct file_operations ext4_file_operations;
+extern ssize_t ext4jp_write_atomic_log(struct file *filep, loff_t offset,
+					 const void *data, size_t size);
 extern loff_t ext4_llseek(struct file *file, loff_t offset, int origin);
 
 /* inline.c */
