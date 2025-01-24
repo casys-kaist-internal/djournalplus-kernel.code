@@ -132,6 +132,13 @@ static ssize_t ext4_dax_read_iter(struct kiocb *iocb, struct iov_iter *to)
 static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
+	ssize_t ret;
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	struct ext4_inode_info *ei = EXT4_I(inode);
+	struct tjournal_atomic_log *cur;
+	loff_t offset = iocb->ki_pos, kdisp, udisp;
+	size_t n, len = to->count;
+#endif
 
 	if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb))))
 		return -EIO;
@@ -146,7 +153,45 @@ static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	if (iocb->ki_flags & IOCB_DIRECT)
 		return ext4_dio_read_iter(iocb, to);
 
-	return generic_file_read_iter(iocb, to);
+	ret = generic_file_read_iter(iocb, to);
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	if (ext4_test_inode_flag(inode, EXT4_STATE_ATOMIC_FILE)) {
+		inode_lock_shared(inode);
+		if (offset + len > inode->i_size && inode->i_size < ei->i_atomic_master.fsize) {
+			n = min(ei->i_atomic_master.fsize, (size_t)offset + len) - max(inode->i_size, offset);
+			if (clear_user(to->ubuf + ret, n)) {
+				ret = -EFAULT;
+				goto end_atomic_read;
+			}
+			ret += n;
+		}
+		cur = ei->i_atomic_master.head;
+		while (cur) {
+			// copy data to user space
+			if (cur->offset + cur->len <= offset) {
+				cur = cur->next;
+				continue;
+			}
+			if (cur->offset >= offset + len)
+				break;
+			kdisp = cur->disp;
+			udisp = 0;
+			if (cur->offset < offset)
+				kdisp += offset - cur->offset;
+			else
+				udisp = cur->offset - offset;
+			n = min(cur->offset + cur->len, offset + len) - max(cur->offset, offset);
+			if (copy_to_user(to->ubuf + udisp, (const char *)cur->data + kdisp, n)) {
+				ret = -EFAULT;
+				goto end_atomic_read;
+			}
+			cur = cur->next;
+		}
+end_atomic_read:
+		inode_unlock_shared(inode);
+	}
+#endif
+	return ret;
 }
 
 /*
@@ -272,7 +317,7 @@ static ssize_t ext4_write_checks(struct kiocb *iocb, struct iov_iter *from)
 #ifdef CONFIG_EXT4_TAU_JOURNALING
 /* based on generic_perform_write() */
 static ssize_t ext4jp_perform_write(struct kiocb *iocb, struct iov_iter *i,
-										struct page **pages)
+										struct page **pages, const void *data)
 {
 	struct file *file = iocb->ki_filp;
 	loff_t pos = iocb->ki_pos;
@@ -300,7 +345,7 @@ again:
 		 * same page as we're writing to, without it being marked
 		 * up-to-date.
 		 */
-		if (unlikely(fault_in_iov_iter_readable(i, bytes) == bytes)) {
+		if (unlikely(!data && fault_in_iov_iter_readable(i, bytes) == bytes)) {
 			status = -EFAULT;
 			break;
 		}
@@ -324,7 +369,10 @@ again:
 		if (mapping_writably_mapped(mapping))
 			flush_dcache_page(page);
 
-		copied = copy_page_from_iter_atomic(page, offset, bytes, i);
+		if (data)
+			copied = copy_page_from_iter_atomic_kern(page, offset, bytes, i, data);
+		else
+			copied = copy_page_from_iter_atomic(page, offset, bytes, i);
 		flush_dcache_page(page);
 
 		status = a_ops->write_end(file, mapping, pos, bytes, copied,
@@ -370,6 +418,103 @@ static ssize_t ext4jp_buffered_write_iter(struct kiocb *iocb,
 	ssize_t ret;
 	int needed_blocks, nr_blks;
 	unsigned int block_size;
+	struct ext4_inode_info *ei = EXT4_I(inode);
+	struct tjournal_atomic_log *cur, *new = NULL, *prev = NULL, *tmp;
+	loff_t offset = iocb->ki_pos;
+	size_t len = from->count;
+
+	if (ext4_test_inode_flag(inode, EXT4_STATE_ATOMIC_FILE)) {
+		cur = ei->i_atomic_master.head;
+		while (cur) {
+			// traverse and remove overlap logs
+			if (cur->offset + cur->len <= offset) {
+				prev = cur;
+				cur = cur->next;
+				continue;
+			}
+			if (cur->offset >= offset + len) {
+				break;
+			}
+			if (cur->offset <= offset && cur->offset + cur->len >= offset + len) {
+				BUG_ON(new);
+				if (copy_from_user(cur->data + cur->disp + offset - cur->offset, from->ubuf, len))
+					return -EFAULT;
+				return len;
+			}
+			if (!new) {
+				new = kmalloc(sizeof(struct tjournal_atomic_log), GFP_KERNEL);
+				if (new == NULL)
+					return -ENOMEM;
+				new->data = kmalloc(len, GFP_KERNEL);
+				if (new->data == NULL) {
+					kfree(new);
+					return -ENOMEM;
+				}
+				new->disp = 0;
+				new->offset = offset;
+				new->len = len;
+				if (copy_from_user(new->data, from->ubuf, len)) {
+					kfree(new->data);
+					kfree(new);
+					return -EFAULT;
+				}
+			}
+			if (cur->offset + cur->len <= offset + len) {
+				if (cur->offset >= offset) {
+					tmp = cur;
+					cur = cur->next;
+					if (prev)
+						prev->next = cur;
+					else
+						ei->i_atomic_master.head = cur;
+					kfree(tmp->data);
+					kfree(tmp);
+					continue;
+				}
+				else {
+					cur->len = offset - cur->offset;
+					prev = cur;
+					cur = cur->next;
+					continue;
+				}
+			}
+			cur->disp += offset + len - cur->offset;
+			cur->len -= offset + len - cur->offset;
+			cur->offset = offset + len;
+			break;
+		}
+		if (!new) {
+			new = kmalloc(sizeof(struct tjournal_atomic_log), GFP_KERNEL);
+			if (new == NULL)
+				return -ENOMEM;
+			new->data = kmalloc(len, GFP_KERNEL);
+			if (new->data == NULL) {
+				kfree(new);
+				return -ENOMEM;
+			}
+			new->disp = 0;
+			new->offset = offset;
+			new->len = len;
+			if (copy_from_user(new->data, from->ubuf, len)) {
+				kfree(new->data);
+				kfree(new);
+				return -EFAULT;
+			}
+		}
+		if (prev) {
+			BUG_ON(prev->next != cur);
+			new->next = cur;
+			prev->next = new;
+		}
+		else {
+			BUG_ON(ei->i_atomic_master.head != cur);
+			new->next = ei->i_atomic_master.head;
+			ei->i_atomic_master.head = new;
+		}
+		if (offset + len > ei->i_atomic_master.fsize)
+			ei->i_atomic_master.fsize = offset + len;
+		return len;
+	}
 
 	/* Total data blocks */
 	block_size =  1 << inode->i_sb->s_blocksize_bits;
@@ -388,7 +533,7 @@ static ssize_t ext4jp_buffered_write_iter(struct kiocb *iocb,
 		return PTR_ERR(handle);
 
 	current->backing_dev_info = inode_to_bdi(inode);
-	ret = ext4jp_perform_write(iocb, from, pages);
+	ret = ext4jp_perform_write(iocb, from, pages, NULL);
 	current->backing_dev_info = NULL;
 
 #ifdef EXT4_JP_ALLOC_ON_COMMIT
@@ -402,6 +547,46 @@ static ssize_t ext4jp_buffered_write_iter(struct kiocb *iocb,
 	kfree(pages);
 	return ret;
 }
+
+ssize_t ext4jp_write_atomic_log(struct file *filep, loff_t offset, const void *data, size_t size) {
+	struct inode *inode = filep->f_inode;
+	struct page **pages;
+	ssize_t ret;
+	int nr_blks;
+	unsigned int block_size;
+	struct kiocb iocb;
+	struct iov_iter from;
+
+	init_sync_kiocb(&iocb, filep);
+	iocb.ki_pos = offset;
+	iov_iter_ubuf(&from, ITER_SOURCE, (void __user *)NULL, size);
+
+	/* Total data blocks */
+	block_size =  1 << inode->i_sb->s_blocksize_bits;
+	nr_blks = (offset % block_size + size + block_size - 1) / block_size;
+
+	/* Grab pages first in batch w/o locking */
+	pages = ext4jp_prepare_pages(inode, &iocb, nr_blks);
+	if (!pages)
+		return -ENOMEM;
+
+	current->backing_dev_info = inode_to_bdi(inode);
+	ret = ext4jp_perform_write(&iocb, &from, pages, data);
+	current->backing_dev_info = NULL;
+
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
+	// We do not consider alloc on commit for now.
+	BUG();
+#endif
+
+	kfree(pages);
+	if (likely(ret > 0)) {
+		iocb.ki_pos += ret;
+		ret = generic_write_sync(&iocb, ret);
+	}
+	return ret;
+}
+
 #endif /* CONFIG_EXT4_TAU_JOURNALING */
 
 static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
