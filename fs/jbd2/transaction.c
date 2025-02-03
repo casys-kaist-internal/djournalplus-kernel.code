@@ -2619,10 +2619,6 @@ int jbd2_journal_invalidate_folio(journal_t *journal, struct folio *folio,
 
 	} while (bh != head);
 
-#ifdef CONFIG_EXT4_TAU_JOURNALING
-	truncate_da_journalled(folio->mapping->host, offset);
-#endif
-
 	if (!partial_page) {
 		if (may_free && try_to_free_buffers(folio))
 			J_ASSERT(!folio_buffers(folio));

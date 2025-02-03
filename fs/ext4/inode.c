@@ -258,6 +258,9 @@ void ext4_evict_inode(struct inode *inode)
 
 	if (ext4_should_order_data(inode))
 		ext4_begin_ordered_truncate(inode, 0);
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	truncate_da_journalled(inode, 0);
+#endif
 	truncate_inode_pages_final(&inode->i_data);
 
 	/*
@@ -3762,6 +3765,7 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 				if (!buffer_taudirty(bh)) {
 					unlock_page(page);
 					spin_unlock(&journal->j_list_lock);
+					pr_err("not dirty!\n");
 					goto out;
 				}
 				clear_buffer_taudirty(bh);

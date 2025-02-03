@@ -202,10 +202,16 @@ restart:
 				 bh->b_page->index);
 			get_bh(bh);
 			spin_unlock(&journal->j_list_lock);
+			if (delayed == bh->b_page->index) {
+				pr_err("da not worked by writepages %lu\n",
+				       bh->b_page->index);
+			}
 			BUG_ON(delayed == bh->b_page->index);
 			BUG_ON(bh->b_page->mapping == NULL);
 			mutex_unlock(&journal->j_checkpoint_mutex);
+			ihold(bh->b_page->mapping->host);
 			tjournal_writepages(bh->b_page->mapping);
+			iput(bh->b_page->mapping->host);
 			mutex_lock_io(&journal->j_checkpoint_mutex);
 			// TODO: error handling
 			delayed = bh->b_page->index;
@@ -1028,6 +1034,8 @@ int truncate_da_journalled(struct inode *inode, pgoff_t start)
 {
 	struct ext4_inode_info *ei = EXT4_I(inode);
 	struct tjournal_da_tree *tree = &ei->i_journalled_da_tree;
+
+	tj_debug("truncate_da_journalled(%lu)\n", start);
 
 	spin_lock(&tree->lock);
 	tree->root = __truncate_da_journalled(tree->root, start);
