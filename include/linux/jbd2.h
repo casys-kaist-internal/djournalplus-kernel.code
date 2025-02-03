@@ -337,8 +337,8 @@ enum jbd_state_bits {
 
 #ifdef CONFIG_EXT4_TAU_JOURNALING
 	/* Do we need delay flags? */
+	BH_TAUTemp,	  /* Temp list on inode */
 	BH_TAUDirty, 	  /* Journalled but not exposed to the VM */
-	BH_TAUDelay,	  /* Delayed but invalidated by inodes */
 #endif
 
 };
@@ -357,7 +357,7 @@ BUFFER_FNS(Verified, verified)
 
 #ifdef CONFIG_EXT4_TAU_JOURNALING
 BUFFER_FNS(TAUDirty, taudirty)
-BUFFER_FNS(TAUDelay, taudelay)
+BUFFER_FNS(TAUTemp, tautemp)
 #endif
 
 static inline struct buffer_head *jh2bh(struct journal_head *jh)

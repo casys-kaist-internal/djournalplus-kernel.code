@@ -1120,6 +1120,10 @@ struct ext4_inode_info {
 #ifdef CONFIG_EXT4_TAU_JOURNALING
 	struct tjournal_da_tree i_journalled_da_tree;
 	struct tjournal_atomic_master i_atomic_master;
+#ifdef CONFIG_EXT4_TAU_JOURNAL_ADVANCED
+	struct journal_head	*i_journal_list;
+	int i_journal_buffer_nr;
+#endif
 #endif
 	/*
 	 * i_disksize keeps track of what the inode size is ON DISK, not

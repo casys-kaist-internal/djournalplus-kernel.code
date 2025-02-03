@@ -155,6 +155,8 @@ int ext4_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 	 * Note: data journal mode do checkpoint before commit transaction
 	 *       it may arise additional I/O, may related to linux WB policy */
 	if (ext4_should_journal_plus(inode)) {
+		// 현재 inode가 들고있는 block들을 tx에 넣은 후
+		// tx를 commit하는 과정을 진행해야함.
 		BUG_ON(!sbi->s_journal);
 		ret = ext4_force_commit(inode->i_sb);
 

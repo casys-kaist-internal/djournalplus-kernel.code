@@ -755,8 +755,10 @@ static int __lookup_da_journalled(struct tjournal_da_tree *tree, pgoff_t *index,
 	spin_unlock(&tree->lock);
 
 	if (!node) {
+		pgoff_t old = *index;
 		*index = next ? next->start : (pgoff_t)-1;
 		*len = 0;
+		tj_debug(" (%s) index(%lu) not found next is (%lu) \n", __func__, old, *index);
 		return 0;
 	}
 
@@ -964,8 +966,10 @@ static int __delete_da_journalled(struct tjournal_da_tree *tree, pgoff_t start,
 unlock:
 	spin_unlock(&tree->lock);
 
-	if (ret < 0)
-		BUG(); /* TODO */
+	if (ret < 0) {
+		pr_err("Failed to delete node(%lu, %u) ret(%d)\n", start, len, ret);
+		ret = 0;
+	}
 
 	return ret;
 }

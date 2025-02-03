@@ -2120,14 +2120,13 @@ static void __jbd2_journal_temp_unlink_buffer(struct journal_head *jh)
 				tj_debug("not using data journal mode\n");
 				mark_buffer_dirty(bh);
 			} else {
+				set_buffer_taudirty(bh);
 				/* This buffer is not allocated yet */
 				if (buffer_delay(bh)) {
 					// tj_debug("delayed block\n");
 					insert_da_journalled(inode,
 							     page->index);
 				}
-				// tj_debug("set dirty\n");
-				set_buffer_taudirty(bh);
 			}
 		} else
 			mark_buffer_dirty(bh); /* Other journaling mode */
@@ -2425,6 +2424,7 @@ static int journal_unmap_buffer(journal_t *journal, struct buffer_head *bh,
 			/* Checking for bug (later this will be deleted) */
 			if (buffer_delay(bh)) {
 				struct inode *inode = bh->b_page->mapping->host;
+				BUG_ON(!(inode->i_sb->s_flags & SB_ACTIVE));
 				if (!(inode->i_sb->s_flags & SB_ACTIVE)) {
 					pr_err("block(%llu) remain on umount\n",
 					       bh->b_blocknr);
@@ -2445,7 +2445,6 @@ static int journal_unmap_buffer(journal_t *journal, struct buffer_head *bh,
 						journal->j_committing_transaction);
 					goto zap_buffer;
 				} else {
-					// tj_debug("no transaction\n");
 					__jbd2_journal_remove_checkpoint(jh);
 					goto zap_buffer;
 				}
@@ -2619,6 +2618,10 @@ int jbd2_journal_invalidate_folio(journal_t *journal, struct folio *folio,
 		bh = next;
 
 	} while (bh != head);
+
+#ifdef CONFIG_EXT4_TAU_JOURNALING
+	truncate_da_journalled(folio->mapping->host, offset);
+#endif
 
 	if (!partial_page) {
 		if (may_free && try_to_free_buffers(folio))

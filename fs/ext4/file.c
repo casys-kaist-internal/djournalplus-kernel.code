@@ -315,6 +315,128 @@ static ssize_t ext4_write_checks(struct kiocb *iocb, struct iov_iter *from)
 }
 
 #ifdef CONFIG_EXT4_TAU_JOURNALING
+
+#ifdef CONFIG_EXT4_TAU_JOURNAL_ADVANCED
+static ssize_t ext4_tjournal_atomic_write(struct kiocb *iocb,
+					struct iov_iter *from, struct inode *inode)
+{
+	struct ext4_inode_info *ei = EXT4_I(inode);
+	struct tjournal_atomic_log *cur, *new = NULL, *prev = NULL, *tmp;
+	loff_t offset = iocb->ki_pos;
+	size_t len = from->count;
+
+	cur = ei->i_atomic_master.head;
+	while (cur) {
+		// traverse and remove overlap logs
+		if (cur->offset + cur->len <= offset) {
+			prev = cur;
+			cur = cur->next;
+			continue;
+		}
+		if (cur->offset >= offset + len) {
+			break;
+		}
+		if (cur->offset <= offset && cur->offset + cur->len >= offset + len) {
+			BUG_ON(new);
+			if (copy_from_user(cur->data + cur->disp + offset - cur->offset, from->ubuf, len))
+				return -EFAULT;
+			return len;
+		}
+		if (!new) {
+			new = kmalloc(sizeof(struct tjournal_atomic_log), GFP_KERNEL);
+			if (new == NULL)
+				return -ENOMEM;
+			new->data = kmalloc(len, GFP_KERNEL);
+			if (new->data == NULL) {
+				kfree(new);
+				return -ENOMEM;
+			}
+			new->disp = 0;
+			new->offset = offset;
+			new->len = len;
+			if (copy_from_user(new->data, from->ubuf, len)) {
+				kfree(new->data);
+				kfree(new);
+				return -EFAULT;
+			}
+		}
+		if (cur->offset + cur->len <= offset + len) {
+			if (cur->offset >= offset) {
+				tmp = cur;
+				cur = cur->next;
+				if (prev)
+					prev->next = cur;
+				else
+					ei->i_atomic_master.head = cur;
+				kfree(tmp->data);
+				kfree(tmp);
+				continue;
+			}
+			else {
+				cur->len = offset - cur->offset;
+				prev = cur;
+				cur = cur->next;
+				continue;
+			}
+		}
+		cur->disp += offset + len - cur->offset;
+		cur->len -= offset + len - cur->offset;
+		cur->offset = offset + len;
+		break;
+	}
+
+	if (!new) {
+		new = kmalloc(sizeof(struct tjournal_atomic_log), GFP_KERNEL);
+		if (new == NULL)
+			return -ENOMEM;
+		new->data = kmalloc(len, GFP_KERNEL);
+		if (new->data == NULL) {
+			kfree(new);
+			return -ENOMEM;
+		}
+		new->disp = 0;
+		new->offset = offset;
+		new->len = len;
+		if (copy_from_user(new->data, from->ubuf, len)) {
+			kfree(new->data);
+			kfree(new);
+			return -EFAULT;
+		}
+	}
+	if (prev) {
+		BUG_ON(prev->next != cur);
+		new->next = cur;
+		prev->next = new;
+	}
+	else {
+		BUG_ON(ei->i_atomic_master.head != cur);
+		new->next = ei->i_atomic_master.head;
+		ei->i_atomic_master.head = new;
+	}
+	if (offset + len > ei->i_atomic_master.fsize)
+		ei->i_atomic_master.fsize = offset + len;
+	return len;
+}
+/**
+ * @brief For multi-block atomic write, start handle outside perform_write
+ *
+ * @note inode_lock is held by caller
+ */
+static ssize_t ext4_tjournal_buffered_write_iter(struct kiocb *iocb,
+					struct iov_iter *from, struct inode *inode)
+{
+	ssize_t ret;
+
+	if (ext4_test_inode_flag(inode, EXT4_STATE_ATOMIC_FILE))
+		return ext4_tjournal_atomic_write(iocb, from, inode);
+
+	current->backing_dev_info = inode_to_bdi(inode);
+	ret = generic_perform_write(iocb, from);
+	current->backing_dev_info = NULL;
+
+	return ret;
+}
+#else
 /* based on generic_perform_write() */
 static ssize_t ext4jp_perform_write(struct kiocb *iocb, struct iov_iter *i,
 										struct page **pages, const void *data)
@@ -587,6 +709,7 @@ ssize_t ext4jp_write_atomic_log(struct file *filep, loff_t offset, const void *d
 	return ret;
 }
 
+#endif /* CONFIG_EXT4_TAU_JOURNAL_ADVANCED */
 #endif /* CONFIG_EXT4_TAU_JOURNALING */
 
 static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
@@ -606,8 +729,13 @@ static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 #ifdef CONFIG_EXT4_TAU_JOURNALING
 	/* TODO: We need to separated tau-mode & normal mode */
 	if (ext4_should_journal_plus(inode)) {
+#ifdef CONFIG_EXT4_TAU_JOURNAL_ADVANCED
+		ret = ext4_tjournal_buffered_write_iter(iocb, from, inode);
+		goto out;
+#else
 		ret = ext4jp_buffered_write_iter(iocb, from, inode);
 		goto out;
+#endif
 	}
 #endif
 

@@ -1364,6 +1364,92 @@ retry_journal:
 }
 
 #ifdef CONFIG_EXT4_TAU_JOURNALING
+
+#ifdef CONFIG_EXT4_TAU_JOURNAL_ADVANCED
+
+int tjournal_temp_write_access(handle_t *handle, struct inode *inode,
+				struct buffer_head *bh)
+{
+	struct journal_head **list = &EXT4_I(inode)->i_journal_list;
+	struct journal_head *jh;
+	int dirty = buffer_dirty(bh);
+
+	if (!buffer_mapped(bh) || buffer_freed(bh))
+		return 0;
+
+	if (dirty)
+		clear_buffer_dirty(bh);
+
+	jh = jbd2_journal_add_journal_head(bh);
+	lock_buffer(bh);
+	if (buffer_tautemp(bh))
+		goto unlock;
+
+	if (!*list) {
+		jh->b_tnext = jh->b_tprev = jh;
+		*list = jh;
+	} else {
+		/* Insert at the tail of the list to preserve order */
+		struct journal_head *first = *list, *last = first->b_tprev;
+		jh->b_tprev = last;
+		jh->b_tnext = first;
+		last->b_tnext = first->b_tprev = jh;
+	}
+	EXT4_I(inode)->i_journal_buffer_nr++;
+	set_buffer_uptodate(bh);
+	set_buffer_tautemp(bh);
+
+unlock:
+	unlock_buffer(bh);
+	jbd2_journal_put_journal_head(jh);
+	return 0;
+}
+
+static int ext4_tjournal_write_begin(struct file *file, struct address_space *mapping,
+			    loff_t pos, unsigned len,
+			    struct page **pagep, void **fsdata)
+{
+	struct inode *inode = mapping->host;
+	struct page *page;
+	int ret;
+	pgoff_t index;
+	unsigned from, to;
+
+	/* For now delayed allocation is default, not dealing with delayed allocation off */
+	BUG_ON(!test_opt(inode->i_sb, DELALLOC));
+	BUG_ON(ext4_test_inode_state(inode, EXT4_STATE_MAY_INLINE_DATA));
+
+	if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb))))
+		return -EIO;
+
+	index = pos >> PAGE_SHIFT;
+	from = pos & (PAGE_SIZE - 1);
+	to = from + len;
+
+	page = grab_cache_page_write_begin(mapping, index);
+	if (!page)
+		return -ENOMEM;
+	if (!page_has_buffers(page))
+		create_empty_buffers(page, inode->i_sb->s_blocksize, 0);
+	folio_set_grab_txhandle(page_folio(page));
+
+	ret = __block_write_begin(page, pos, len, ext4_da_get_block_prep);
+	if (!ret) {
+		ret = ext4_walk_page_buffers(NULL, inode,
+					     page_buffers(page), from, to, NULL,
+					     tjournal_temp_write_access);
+	} else {
+		folio_end_txhandle(page_folio(page));
+		unlock_page(page);
+		put_page(page);
+		return ret;
+	}
+
+	*pagep = page;
+	return ret;
+}
+
+#else
 static int ext4jp_write_begin(struct file *file, struct address_space *mapping,
 			    loff_t pos, unsigned len,
 			    struct page **pagep, void **fsdata)
@@ -1398,7 +1484,8 @@ static int ext4jp_write_begin(struct file *file, struct address_space *mapping,
 
 	return ret;
 }
-#endif
+#endif /* CONFIG_EXT4_TAU_JOURNAL_ADVANCED */
+#endif /* CONFIG_EXT4_TAU_JOURNALING */
 
 /* For write_end() in data=journal mode */
 static int write_end_fn(handle_t *handle, struct inode *inode,
@@ -1524,6 +1611,35 @@ static void ext4_journalled_zero_new_buffers(handle_t *handle,
 }
 
 #ifdef CONFIG_EXT4_TAU_JOURNALING
+
+#ifdef CONFIG_EXT4_TAU_JOURNAL_ADVANCED
+static int ext4_tjournal_write_end(struct file *file,
+				     struct address_space *mapping,
+				     loff_t pos, unsigned len, unsigned copied,
+				     struct page *page, void *fsdata)
+{
+	struct inode *inode = mapping->host;
+	int ret;
+	unsigned from, to;
+
+	from = pos & (PAGE_SIZE - 1);
+	to = from + len;
+	ret = 0;
+
+	BUG_ON(ext4_has_inline_data(inode));
+
+	ext4_set_inode_state(inode, EXT4_STATE_JDATA);
+	ext4_update_inode_size(inode, pos + copied);
+	SetPageUptodate(page);
+	unlock_page(page);
+	put_page(page);
+	folio_end_txhandle(page_folio(page));
+
+	return ret ? ret : copied;
+}
+#endif
+
+
 static int ext4jp_write_end(struct file *file,
 				     struct address_space *mapping,
 				     loff_t pos, unsigned len, unsigned copied,
@@ -3562,6 +3678,7 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 	struct pagevec pvec;
 	struct inode *inode = mpd->inode;
 	struct buffer_head *bh, *head;
+	journal_t *journal = EXT4_JOURNAL(inode);
 	unsigned int nr_pages;
 	long left = mpd->wbc->nr_to_write;
 	pgoff_t index = mpd->first_page;
@@ -3638,10 +3755,15 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 			       << (PAGE_SHIFT - blkbits);
 			head = page_buffers(page);
 			bh = head;
+			spin_lock(&journal->j_list_lock);
 			do {
 				BUG_ON(buffer_locked(bh));
-				BUG_ON(!buffer_taudirty(bh));
-				BUG_ON(!buffer_delay(bh)); // must be delayed
+				/* somebody truncate this buffer */
+				if (!buffer_taudirty(bh)) {
+					unlock_page(page);
+					spin_unlock(&journal->j_list_lock);
+					goto out;
+				}
 				clear_buffer_taudirty(bh);
 				set_buffer_dirty(bh); // we can add to extent if it is dirty
 			} while ((bh = bh->b_this_page) != head);
@@ -3653,9 +3775,11 @@ static int tjournal_prepare_extent_to_map(struct mpage_da_data *mpd)
 				 * only revirt the buffer state */
 				set_buffer_taudirty(bh);
 				clear_buffer_dirty(bh);
+				spin_unlock(&journal->j_list_lock);
 				tj_debug("mpage_process_page_bufs ret(%d) pvec.nr(%d)\n", err, pvec.nr);
 				goto out;
 			}
+			spin_unlock(&journal->j_list_lock);
 
 			err = 0;
 			left--;
@@ -4267,7 +4391,8 @@ static bool ext4_release_folio(struct folio *folio, gfp_t wait)
 
 #ifdef CONFIG_EXT4_TAU_JOURNALING
 	if (journal && journal->j_flags & JBD2_EXT4_JOURNAL_PLUS) {
-		tj_warn("try to free buffers\n");
+		// fio-sequential overwrite call this
+		// tj_warn("try to free buffers\n");
 		return tjournal_try_to_free_buffers(folio);
 	}
 #endif
@@ -4665,6 +4790,24 @@ static const struct address_space_operations ext4_journalled_aops = {
 };
 
 #ifdef CONFIG_EXT4_TAU_JOURNALING
+#ifdef CONFIG_EXT4_TAU_JOURNAL_ADVANCED
+static const struct address_space_operations ext4_tau_journal_aops = {
+	.read_folio		= ext4_read_folio,
+	.readahead		= ext4_readahead,
+	.writepages		= ext4jp_writepages,
+	.write_begin		= ext4_tjournal_write_begin,
+	.write_end		= ext4_tjournal_write_end,
+	.dirty_folio		= ext4_journalled_dirty_folio,
+	.bmap			= ext4_bmap,
+	.invalidate_folio	= ext4_journalled_invalidate_folio,
+	.release_folio		= ext4_release_folio,
+	.direct_IO		= noop_direct_IO,
+	.migrate_folio		= buffer_migrate_folio_norefs,
+	.is_partially_uptodate  = block_is_partially_uptodate,
+	.error_remove_page	= generic_error_remove_page,
+	.swap_activate		= ext4_iomap_swap_activate,
+};
+#else
 static const struct address_space_operations ext4_journalled_plus_aops = {
 	.read_folio		= ext4_read_folio,
 	.readahead		= ext4_readahead,
@@ -4681,6 +4824,7 @@ static const struct address_space_operations ext4_journalled_plus_aops = {
 	.error_remove_page	= generic_error_remove_page,
 	.swap_activate		= ext4_iomap_swap_activate,
 };
+#endif
 #endif
 
 static const struct address_space_operations ext4_da_aops = {
@@ -4718,9 +4862,15 @@ void ext4_set_aops(struct inode *inode)
 		inode->i_mapping->a_ops = &ext4_journalled_aops;
 		return;
 #ifdef CONFIG_EXT4_TAU_JOURNALING
+#ifdef CONFIG_EXT4_TAU_JOURNAL_ADVANCED
+	case EXT4_INODE_JOURNAL_PLUS_MODE:
+		inode->i_mapping->a_ops = &ext4_tau_journal_aops;
+		return;
+#else
 	case EXT4_INODE_JOURNAL_PLUS_MODE:
 		inode->i_mapping->a_ops = &ext4_journalled_plus_aops;
 		return;
+#endif
 #endif
 	default:
 		BUG();

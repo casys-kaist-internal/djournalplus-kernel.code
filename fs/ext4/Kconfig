@@ -123,6 +123,11 @@ config EXT4_TAU_JOURNALING
     depends on EXT4_FS
     default y
 
+config EXT4_TAU_JOURNAL_NEW
+    bool "TAU-Journaling new mode implementing, not done yet"
+    depends on EXT4_TAU_JOURNALING
+    default n
+
 config EXT4_JP_ALLOC_ON_COMMIT
     bool "Prevent data loss due to delayed allocation"
     depends on EXT4_FS
