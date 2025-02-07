@@ -160,6 +160,10 @@ static inline size_t iov_length(const struct iovec *iov, unsigned long nr_segs)
 
 size_t copy_page_from_iter_atomic(struct page *page, size_t offset,
 				  size_t bytes, struct iov_iter *i);
+#ifdef CONFIG_EXT4_TAU_JOURNAL_ATOMIC_FILE
+size_t copy_page_from_iter_atomic_kern(struct page *page, unsigned offset,
+				  size_t bytes, struct iov_iter *i, const char *data);
+#endif
 void iov_iter_advance(struct iov_iter *i, size_t bytes);
 void iov_iter_revert(struct iov_iter *i, size_t bytes);
 size_t fault_in_iov_iter_readable(const struct iov_iter *i, size_t bytes);

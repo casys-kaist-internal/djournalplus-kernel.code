@@ -25,6 +25,13 @@ struct journal_head {
 	 */
 	struct buffer_head *b_bh;
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+	/* We can reuse temp buffer_head? in data journal mode
+	 * TODO: (not implemented yet) */
+	// struct buffer_head *j_bh; <--- buffer for reuse in committing
+	// NOTE: b_committed_data not used in ext4
+#endif
+
 	/*
 	 * Protect the buffer head state
 	 */

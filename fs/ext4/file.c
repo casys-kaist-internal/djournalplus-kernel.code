@@ -130,6 +130,13 @@ static ssize_t ext4_dax_read_iter(struct kiocb *iocb, struct iov_iter *to)
 static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
+#ifdef CONFIG_EXT4_TAU_JOURNAL_ATOMIC_FILE
+	struct ext4_inode_info *ei = EXT4_I(inode);
+	struct tjournal_atomic_log *cur;
+	loff_t offset = iocb->ki_pos, kdisp, udisp;
+	size_t n, len = to->count;
+	ssize_t ret;
+#endif
 
 	if (unlikely(ext4_forced_shutdown(inode->i_sb)))
 		return -EIO;
@@ -144,7 +151,47 @@ static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	if (iocb->ki_flags & IOCB_DIRECT)
 		return ext4_dio_read_iter(iocb, to);
 
+#ifndef CONFIG_EXT4_TAU_JOURNAL_ATOMIC_FILE
 	return generic_file_read_iter(iocb, to);
+#else
+	ret = generic_file_read_iter(iocb, to);
+	if (ext4_test_inode_flag(inode, EXT4_STATE_ATOMIC_FILE)) {
+		inode_lock_shared(inode);
+		if (offset + len > inode->i_size && inode->i_size < ei->i_atomic_master.fsize) {
+			n = min(ei->i_atomic_master.fsize, (size_t)offset + len) - max(inode->i_size, offset);
+			if (clear_user(to->ubuf + ret, n)) {
+				ret = -EFAULT;
+				goto end_atomic_read;
+			}
+			ret += n;
+		}
+		cur = ei->i_atomic_master.head;
+		while (cur) {
+			// copy data to user space
+			if (cur->offset + cur->len <= offset) {
+				cur = cur->next;
+				continue;
+			}
+			if (cur->offset >= offset + len)
+				break;
+			kdisp = cur->disp;
+			udisp = 0;
+			if (cur->offset < offset)
+				kdisp += offset - cur->offset;
+			else
+				udisp = cur->offset - offset;
+			n = min(cur->offset + cur->len, offset + len) - max(cur->offset, offset);
+			if (copy_to_user(to->ubuf + udisp, (const char *)cur->data + kdisp, n)) {
+				ret = -EFAULT;
+				goto end_atomic_read;
+			}
+			cur = cur->next;
+		}
+	end_atomic_read:
+		inode_unlock_shared(inode);
+	}
+	return ret;
+#endif
 }
 
 static ssize_t ext4_file_splice_read(struct file *in, loff_t *ppos,
@@ -282,6 +329,284 @@ static ssize_t ext4_write_checks(struct kiocb *iocb, struct iov_iter *from)
 	return count;
 }
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+
+/* based on generic_perform_write() */
+static ssize_t ext4_tjournal_perform_write(struct kiocb *iocb, struct iov_iter *i,
+										struct page **pages, const void *data)
+{
+	struct file *file = iocb->ki_filp;
+	loff_t pos = iocb->ki_pos;
+	struct address_space *mapping = file->f_mapping;
+	const struct address_space_operations *a_ops = mapping->a_ops;
+	long status = 0;
+	ssize_t written = 0;
+	int index = 0;
+
+	do {
+		struct page *page;
+		unsigned long offset;	/* Offset into pagecache page */
+		unsigned long bytes;	/* Bytes to write to page */
+		size_t copied;		/* Bytes copied from user */
+		void *fsdata = NULL;
+
+		offset = (pos & (PAGE_SIZE - 1));
+		bytes = min_t(unsigned long, PAGE_SIZE - offset,
+						iov_iter_count(i));
+
+again:
+		/*
+		 * Bring in the user page that we will copy from _first_.
+		 * Otherwise there's a nasty deadlock on copying from the
+		 * same page as we're writing to, without it being marked
+		 * up-to-date.
+		 */
+		if (unlikely(!data && fault_in_iov_iter_readable(i, bytes) == bytes)) {
+			status = -EFAULT;
+			break;
+		}
+
+		if (fatal_signal_pending(current)) {
+			status = -EINTR;
+			break;
+		}
+
+		page = pages[index];
+		lock_page(page);
+
+		status = a_ops->write_begin(file, mapping, pos, bytes,
+						&page, &fsdata);
+		if (unlikely(status < 0)) {
+			unlock_page(page);
+			put_page(page);
+			break;
+		}
+
+		if (mapping_writably_mapped(mapping))
+			flush_dcache_page(page);
+#ifdef CONFIG_EXT4_TAU_JOURNAL_ATOMIC_FILE
+		if (data)
+			copied = copy_page_from_iter_atomic_kern(page, offset, bytes, i, data);
+		else
+			copied = copy_page_from_iter_atomic(page, offset, bytes, i);
+#else
+		copied = copy_page_from_iter_atomic(page, offset, bytes, i);
+#endif
+		flush_dcache_page(page);
+
+		status = a_ops->write_end(file, mapping, pos, bytes, copied,
+						page, fsdata);
+		if (unlikely(status != copied)) {
+			iov_iter_revert(i, copied - max(status, 0L));
+			if (unlikely(status < 0))
+				break;
+		}
+		cond_resched();
+
+		if (unlikely(status == 0)) {
+			/*
+			 * A short copy made ->write_end() reject the
+			 * thing entirely.  Might be memory poisoning
+			 * halfway through, might be a race with munmap,
+			 * might be severe memory pressure.
+			 */
+			if (copied)
+				bytes = copied;
+			goto again;
+		}
+		pos += status;
+		written += status;
+
+		balance_dirty_pages_ratelimited(mapping);
+		index++;
+	} while (iov_iter_count(i));
+
+	return written ? written : status;
+}
+
+/**
+ * @brief For multi-block atomic write, start handle outside perform_write
+ * 
+ * @note inode_lock is held by caller
+ */
+static ssize_t ext4_tjournal_buffered_write_iter(struct kiocb *iocb,
+					struct iov_iter *from, struct inode *inode)
+{
+	struct page **pages;
+	handle_t *handle = NULL;
+	ssize_t ret;
+	int needed_blocks, nr_blks;
+	unsigned int block_size;
+#ifdef CONFIG_EXT4_TAU_JOURNAL_ATOMIC_FILE
+	struct ext4_inode_info *ei = EXT4_I(inode);
+	struct tjournal_atomic_log *cur, *new = NULL, *prev = NULL, *tmp;
+	loff_t offset = iocb->ki_pos;
+	size_t len = from->count;
+	if (ext4_test_inode_flag(inode, EXT4_STATE_ATOMIC_FILE)) {
+		cur = ei->i_atomic_master.head;
+		while (cur) {
+			// traverse and remove overlap logs
+			if (cur->offset + cur->len <= offset) {
+				prev = cur;
+				cur = cur->next;
+				continue;
+			}
+			if (cur->offset >= offset + len) {
+				break;
+			}
+			if (cur->offset <= offset && cur->offset + cur->len >= offset + len) {
+				BUG_ON(new);
+				if (copy_from_user(cur->data + cur->disp + offset - cur->offset, from->ubuf, len))
+					return -EFAULT;
+				return len;
+			}
+			if (!new) {
+				new = kmalloc(sizeof(struct tjournal_atomic_log), GFP_KERNEL);
+				if (new == NULL)
+					return -ENOMEM;
+				new->data = kmalloc(len, GFP_KERNEL);
+				if (new->data == NULL) {
+					kfree(new);
+					return -ENOMEM;
+				}
+				new->disp = 0;
+				new->offset = offset;
+				new->len = len;
+				if (copy_from_user(new->data, from->ubuf, len)) {
+					kfree(new->data);
+					kfree(new);
+					return -EFAULT;
+				}
+			}
+			if (cur->offset + cur->len <= offset + len) {
+				if (cur->offset >= offset) {
+					tmp = cur;
+					cur = cur->next;
+					if (prev)
+						prev->next = cur;
+					else
+						ei->i_atomic_master.head = cur;
+					kfree(tmp->data);
+					kfree(tmp);
+					continue;
+				}
+				else {
+					cur->len = offset - cur->offset;
+					prev = cur;
+					cur = cur->next;
+					continue;
+				}
+			}
+			cur->disp += offset + len - cur->offset;
+			cur->len -= offset + len - cur->offset;
+			cur->offset = offset + len;
+			break;
+		}
+		if (!new) {
+			new = kmalloc(sizeof(struct tjournal_atomic_log), GFP_KERNEL);
+			if (new == NULL)
+				return -ENOMEM;
+			new->data = kmalloc(len, GFP_KERNEL);
+			if (new->data == NULL) {
+				kfree(new);
+				return -ENOMEM;
+			}
+			new->disp = 0;
+			new->offset = offset;
+			new->len = len;
+			if (copy_from_user(new->data, from->ubuf, len)) {
+				kfree(new->data);
+				kfree(new);
+				return -EFAULT;
+			}
+		}
+		if (prev) {
+			BUG_ON(prev->next != cur);
+			new->next = cur;
+			prev->next = new;
+		}
+		else {
+			BUG_ON(ei->i_atomic_master.head != cur);
+			new->next = ei->i_atomic_master.head;
+			ei->i_atomic_master.head = new;
+		}
+		if (offset + len > ei->i_atomic_master.fsize)
+			ei->i_atomic_master.fsize = offset + len;
+		return len;
+	}
+#endif
+
+	/* Total data blocks */
+	block_size =  1 << inode->i_sb->s_blocksize_bits;
+	nr_blks = (iocb->ki_pos % block_size + from->count + block_size - 1) / block_size;
+
+	/* Grab pages first in batch w/o locking */
+	pages = ext4_tjournal_prepare_pages(inode, iocb, nr_blks);
+	if (!pages)
+		return -ENOMEM;
+
+	/* Data blocks + some metadata blocks */
+	needed_blocks = nr_blks +  EXT4_META_TRANS_BLOCKS(inode->i_sb);
+
+	handle = ext4_journal_start(inode, EXT4_HT_WRITE_PAGE, needed_blocks);
+	if (IS_ERR(handle))
+		return PTR_ERR(handle);
+
+	ret = ext4_tjournal_perform_write(iocb, from, pages, NULL);
+
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
+	if (nr_append) /* We did dealloc some block. */
+		ext4jp_alloc_on_commit_or_stop(handle, inode);
+	else /* We did not dealloc any block. */
+		ext4_journal_stop(handle);
+#endif
+
+	ext4_journal_stop(handle);
+	kfree(pages);
+	return ret;
+}
+#ifdef CONFIX_EXT4_TAU_JOURNAL_ATOMIC_FILE
+ssize_t ext4_tjournal_write_atomic_log(struct file *filep, loff_t offset, const void *data, size_t size) {
+	struct inode *inode = filep->f_inode;
+	struct page **pages;
+	ssize_t ret;
+	int nr_blks;
+	unsigned int block_size;
+	struct kiocb iocb;
+	struct iov_iter from;
+
+	init_sync_kiocb(&iocb, filep);
+	iocb.ki_pos = offset;
+	iov_iter_ubuf(&from, ITER_SOURCE, (void __user *)NULL, size);
+
+	/* Total data blocks */
+	block_size =  1 << inode->i_sb->s_blocksize_bits;
+	nr_blks = (offset % block_size + size + block_size - 1) / block_size;
+
+	/* Grab pages first in batch w/o locking */
+	pages = ext4_tjournal_prepare_pages(inode, &iocb, nr_blks);
+	if (!pages)
+		return -ENOMEM;
+
+	current->backing_dev_info = inode_to_bdi(inode);
+	ret = ext4_tjournal_perform_write(&iocb, &from, pages, data);
+	current->backing_dev_info = NULL;
+
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
+	// We do not consider alloc on commit for now.
+	BUG();
+#endif
+
+	kfree(pages);
+	if (likely(ret > 0)) {
+		iocb.ki_pos += ret;
+		ret = generic_write_sync(&iocb, ret);
+	}
+	return ret;
+}
+#endif
+#endif /* CONFIG_EXT4_TAU_JOURNAL */
+
 static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 					struct iov_iter *from)
 {
@@ -295,6 +620,14 @@ static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
 	ret = ext4_write_checks(iocb, from);
 	if (ret <= 0)
 		goto out;
+
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+	/* TODO: We need to separated tau-mode & normal mode */
+	if (ext4_should_tjournal(inode)) {
+		ret = ext4_tjournal_buffered_write_iter(iocb, from, inode);
+		goto out;
+	}
+#endif
 
 	ret = generic_perform_write(iocb, from);
 

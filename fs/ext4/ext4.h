@@ -997,6 +997,38 @@ enum {
 	I_DATA_SEM_EA
 };
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+/*
+ * TAU-journaling mode, delayed allocation state for single file.
+ * It tracks journalled but not allocated pages.
+ *
+ */
+struct tjournal_da_node {
+    unsigned long start; /* start index of page */
+    unsigned int len;
+    struct tjournal_da_node *left;
+    struct tjournal_da_node *right;
+};
+
+struct tjournal_da_tree {
+    struct tjournal_da_node *root;
+    spinlock_t lock;
+};
+
+#ifdef CONFIG_EXT4_TAU_JOURNAL_ATOMIC_FILE
+struct tjournal_atomic_master {
+	size_t fsize;
+	struct tjournal_atomic_log *head;
+};
+struct tjournal_atomic_log {
+	loff_t disp;
+	loff_t offset;
+	size_t len;
+	void *data;
+	struct tjournal_atomic_log *next;
+};
+#endif
+#endif /* EXT4_TAU_JOURNAL */
 
 /*
  * fourth extended file system inode data in memory
@@ -1061,6 +1093,13 @@ struct ext4_inode_info {
 
 	/* Protect concurrent accesses on i_fc_lblk_start, i_fc_lblk_len */
 	struct mutex i_fc_lock;
+
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+	struct tjournal_da_tree i_journalled_da_tree;
+#ifdef CONFIG_EXT4_TAU_JOURNAL_ATOMIC_FILE
+	struct tjournal_atomic_master i_atomic_master;
+#endif
+#endif
 
 	/*
 	 * i_disksize keeps track of what the inode size is ON DISK, not
@@ -1250,6 +1289,10 @@ struct ext4_inode_info {
 #define EXT4_MOUNT2_MB_OPTIMIZE_SCAN	0x00000080 /* Optimize group
 						    * scanning in mballoc
 						    */
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+#define EXT4_MOUNT2_TAU_JOURNAL 0x00000100 /* Tau-journaling mode */
+#endif
+
 #define EXT4_MOUNT2_ABORT		0x00000100 /* Abort filesystem */
 
 #define clear_opt(sb, opt)		EXT4_SB(sb)->s_mount_opt &= \
@@ -1912,6 +1955,9 @@ enum {
 	EXT4_STATE_VERITY_IN_PROGRESS,	/* building fs-verity Merkle tree */
 	EXT4_STATE_FC_COMMITTING,	/* Fast commit ongoing */
 	EXT4_STATE_ORPHAN_FILE,		/* Inode orphaned in orphan file */
+#ifdef CONFIG_EXT4_TAU_JOURNAL_ATOMIC_FILE
+	EXT4_STATE_ATOMIC_FILE,		/* Atomic file */
+#endif
 };
 
 #define EXT4_INODE_BIT_FNS(name, field, offset)				\
@@ -2053,7 +2099,9 @@ static inline bool ext4_verity_in_progress(struct inode *inode)
 #define EXT4_FEATURE_INCOMPAT_INLINE_DATA	0x8000 /* data in inode */
 #define EXT4_FEATURE_INCOMPAT_ENCRYPT		0x10000
 #define EXT4_FEATURE_INCOMPAT_CASEFOLD		0x20000
-
+#ifdef CONFIG_EXT4_TAU_JOURNAL_ATOMIC_FILE
+#define EXT4_FEATURE_ATOMIC_WRITE		0x40000 /* TODO: modify sqlite to fulfill */
+#endif
 extern void ext4_update_dynamic_rev(struct super_block *sb);
 
 #define EXT4_FEATURE_COMPAT_FUNCS(name, flagname) \
@@ -3838,6 +3886,18 @@ static inline int ext4_buffer_uptodate(struct buffer_head *bh)
 		set_buffer_uptodate(bh);
 	return buffer_uptodate(bh);
 }
+
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+int ext4_tjournal_writepages(struct address_space *mapping,
+			   struct writeback_control *wbc);
+extern int ext4_tjournal_writepage_trans_blocks(struct inode *inode, size_t cnt);
+extern int ext4_tjournal_count_nr_append(struct inode *inode, loff_t pos, ssize_t len);
+extern struct page **ext4_tjournal_prepare_pages(struct inode *, struct kiocb *, int nr);
+#ifdef CONFIX_EXT4_TAU_JOURNAL_ATOMIC_FILE
+extern ssize_t ext4_tjournal_write_atomic_log(struct file *filep, loff_t offset,
+					 const void *data, size_t size);
+#endif
+#endif
 
 #endif	/* __KERNEL__ */
 

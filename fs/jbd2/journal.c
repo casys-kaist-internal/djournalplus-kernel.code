@@ -48,6 +48,10 @@
 #include <linux/uaccess.h>
 #include <asm/page.h>
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+#include "../ext4/tau_journal.h"
+#endif
+
 #ifdef CONFIG_JBD2_DEBUG
 static ushort jbd2_journal_enable_debug __read_mostly;
 
@@ -350,6 +354,14 @@ int jbd2_journal_write_metadata_buffer(transaction_t *transaction,
 	J_ASSERT_BH(bh_in, buffer_jbddirty(bh_in));
 
 	new_bh = alloc_buffer_head(GFP_NOFS|__GFP_NOFAIL);
+
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+	/* NOTE: bh recycling optimization, this bh will be freed after commit.
+	 *       It can be overhead when we do data journaling */
+	// new_bh = jh_in->j_bh;
+	// BUG_ON(!new_bh);
+	// get_bh(new_bh);
+#endif
 
 	/* keep subsequent assertions sane */
 	atomic_set(&new_bh->b_count, 1);
@@ -1546,6 +1558,13 @@ static journal_t *journal_init_common(struct block_device *bdev,
 	init_waitqueue_head(&journal->j_wait_updates);
 	init_waitqueue_head(&journal->j_wait_reserved);
 	init_waitqueue_head(&journal->j_fc_wait);
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+	init_waitqueue_head(&journal->j_wait_checkpoint);
+	init_waitqueue_head(&journal->j_wait_done_checkpoint);
+	journal->j_checkpoint_threshold =
+		(unsigned long)len * TAU_CHECKPOINT_THRESHOLD / 100;
+	journal->j_requested_checkpoint = 0;
+#endif
 	mutex_init(&journal->j_abort_mutex);
 	mutex_init(&journal->j_barrier);
 	mutex_init(&journal->j_checkpoint_mutex);
@@ -1935,6 +1954,15 @@ static void jbd2_mark_journal_empty(journal_t *journal, blk_opf_t write_flags)
 	write_unlock(&journal->j_state_lock);
 }
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+/* Helper function to expose jbd2 API to tau-journaling mode */
+void tjournal_mark_journal_empty(journal_t *journal, blk_opf_t write_flags)
+{
+	jbd2_mark_journal_empty(journal, write_flags);
+}
+EXPORT_SYMBOL(tjournal_mark_journal_empty);
+#endif
+
 /**
  * __jbd2_journal_erase() - Discard or zeroout journal blocks (excluding superblock)
  * @journal: The journal to erase.
@@ -2133,6 +2161,17 @@ int jbd2_journal_destroy(journal_t *journal)
 		jbd2_journal_commit_transaction(journal);
 
 	/* Force any old transactions to disk */
+
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+	if (journal->j_flags & JBD2_EXT4_TAU_JOURNAL &&
+		journal->j_checkpoint_transactions != NULL) {
+		wake_up(&journal->j_wait_checkpoint);
+		wait_event(journal->j_wait_done_checkpoint,
+						journal->tjournal_task == NULL);
+		if (journal->j_checkpoint_transactions != NULL)
+			pr_err("jbd2_journal_destroy: checkpointing failed\n");
+	}
+#endif
 
 	/* Totally anal locking here... */
 	spin_lock(&journal->j_list_lock);
@@ -2932,6 +2971,12 @@ repeat:
 			goto repeat;
 		}
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+		/* we can alloc temp buffer_head at this point */
+		// else
+		// 	new_jh->j_bh = alloc_buffer_head(GFP_NOFS|__GFP_NOFAIL);
+#endif
+
 		jh = new_jh;
 		new_jh = NULL;		/* We consumed it */
 		set_buffer_jbd(bh);
@@ -2994,6 +3039,12 @@ static void journal_release_journal_head(struct journal_head *jh, size_t b_size)
 		jbd2_free(jh->b_committed_data, b_size);
 	}
 	journal_free_journal_head(jh);
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+	// if (jh->j_bh) {
+	// 	BUG_ON(atomic_read(&jh->j_bh->b_count) != 0);
+	// 	free_buffer_head(jh->j_bh);
+	// }
+#endif
 }
 
 /*
@@ -3030,6 +3081,10 @@ void jbd2_journal_init_jbd_inode(struct jbd2_inode *jinode, struct inode *inode)
 	jinode->i_dirty_start = 0;
 	jinode->i_dirty_end = 0;
 	INIT_LIST_HEAD(&jinode->i_list);
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
+	jinode->i_handle = NULL;
+	INIT_LIST_HEAD(&jinode->i_jp_list);
+#endif
 }
 
 /*

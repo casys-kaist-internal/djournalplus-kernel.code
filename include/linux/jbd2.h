@@ -219,6 +219,16 @@ typedef struct jbd2_journal_revoke_header_s
 #define JBD2_FLAG_DELETED	4	/* block deleted by this transaction */
 #define JBD2_FLAG_LAST_TAG	8	/* last tag in this descriptor block */
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+#define JBD2_FLAG_DELAYED  16
+typedef struct journal_block_tag_da_s
+{
+	__be32		t_pgidx;	/* The on-disk block number */
+	__be16		t_checksum;	/* truncated crc32c(uuid+seq+block) */
+	__be16		t_flags;	/* See below */
+	__be32		t_pgidx_high; /* most-significant high 32bits. */
+} journal_block_tag_da_t;
+#endif
 
 /*
  * The journal superblock.  All fields are in big-endian byte order.
@@ -314,6 +324,11 @@ enum jbd_state_bits {
 	BH_Shadow,		/* IO on shadow buffer is running */
 	BH_Verified,		/* Metadata block has been verified ok */
 	BH_JBDPrivateStart,	/* First bit available for private use by FS */
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+	/* Do we need delay flags? */
+	BH_TAUTemp,	  /* Temp list on inode */
+	BH_TAUDirty, 	  /* Journalled but not exposed to the VM */
+#endif
 };
 
 BUFFER_FNS(JBD, jbd)
@@ -327,6 +342,11 @@ TAS_BUFFER_FNS(RevokeValid, revokevalid)
 BUFFER_FNS(Freed, freed)
 BUFFER_FNS(Shadow, shadow)
 BUFFER_FNS(Verified, verified)
+
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+BUFFER_FNS(TAUDirty, taudirty)
+BUFFER_FNS(TAUTemp, tautemp)
+#endif
 
 static inline struct buffer_head *jh2bh(struct journal_head *jh)
 {
@@ -443,6 +463,11 @@ struct jbd2_inode {
 	 * ends. [j_list_lock]
 	 */
 	loff_t i_dirty_end;
+
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
+	struct list_head	i_jp_list;
+	handle_t		*i_handle;
+#endif
 };
 
 struct jbd2_revoke_table_s;
@@ -1097,6 +1122,15 @@ struct journal_s
 	 */
 	struct timer_list	j_commit_timer;
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+	struct task_struct	*tjournal_task; /* tjournald */
+	wait_queue_head_t j_wait_checkpoint; /* to wake tjournald*/
+	wait_queue_head_t	j_wait_done_checkpoint; /* wait tjournald do its job done */
+	struct buffer_head	*tjournal_chkpt_bhs[JBD2_NR_BATCH];
+	unsigned long j_checkpoint_threshold; /* threshold in journal area for checkpoint */
+	unsigned long j_requested_checkpoint; /* requested checkpoint */
+#endif
+
 	/**
 	 * @j_revoke_lock: Protect the revoke table.
 	 */
@@ -1172,6 +1206,16 @@ struct journal_s
 	 * to get batched into a synchronous handle in microseconds.
 	 */
 	u32			j_max_batch_time;
+
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
+	/**
+	 * @j_pre_commit_callback:
+	 *
+	 * This function is called before a transaction is closed.
+	 */
+	void			(*j_pre_commit_callback)(journal_t *,
+						     transaction_t *);
+#endif
 
 	/**
 	 * @j_commit_callback:
@@ -1396,6 +1440,10 @@ JBD2_FEATURE_INCOMPAT_FUNCS(fast_commit,	FAST_COMMIT)
 						 * logging area */
 #define JBD2_FAST_COMMIT_ONGOING	0x100	/* Fast commit is ongoing */
 #define JBD2_FULL_COMMIT_ONGOING	0x200	/* Full commit is ongoing */
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+#define JBD2_EXT4_TAU_JOURNAL	0x400	/* Imply Ext4 tau journaling mode */
+#define JBD2_FORCE_CHECKPOINT		0x800	/* Do checkpoint in journal */
+#endif
 #define JBD2_JOURNAL_FLUSH_DISCARD	0x0001
 #define JBD2_JOURNAL_FLUSH_ZEROOUT	0x0002
 #define JBD2_JOURNAL_FLUSH_VALID	(JBD2_JOURNAL_FLUSH_DISCARD | \
@@ -1567,6 +1615,10 @@ extern int	   jbd2_journal_inode_ranged_write(handle_t *handle,
 extern int	   jbd2_journal_inode_ranged_wait(handle_t *handle,
 			struct jbd2_inode *inode, loff_t start_byte,
 			loff_t length);
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
+extern int	   jbd2jp_journal_inode_pre_commit(
+			handle_t *handle, struct jbd2_inode *jinode);
+#endif
 extern int	   jbd2_journal_finish_inode_data_buffers(
 			struct jbd2_inode *jinode);
 extern int	   jbd2_journal_begin_ordered_truncate(journal_t *journal,
@@ -1666,6 +1718,10 @@ static inline int jbd2_journal_get_max_txn_bufs(journal_t *journal)
 {
 	return (journal->j_total_len - journal->j_fc_wbufsize) / 4;
 }
+
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+extern void tjournal_mark_journal_empty(journal_t *journal, blk_opf_t write_flags);
+#endif
 
 /*
  * is_journal_abort

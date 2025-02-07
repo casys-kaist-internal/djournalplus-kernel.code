@@ -22,6 +22,10 @@
 #include <linux/blkdev.h>
 #include <trace/events/jbd2.h>
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+#include "../ext4/tau_journal.h"
+#endif
+
 /*
  * Unlink a buffer from a transaction checkpoint list.
  *
@@ -54,6 +58,20 @@ __releases(&journal->j_state_lock)
 	/* assert_spin_locked(&journal->j_state_lock); */
 
 	nblocks = journal->j_max_transaction_buffers;
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+	if (journal->j_flags & JBD2_EXT4_TAU_JOURNAL) {
+		tjk_debug("Call tjournald for checkpoint we need %d blocks\n", nblocks);
+		/* Is it possible that cannot wake up if no journal area? */
+		if (journal->j_requested_checkpoint < nblocks)
+		journal->j_requested_checkpoint = nblocks;
+		write_unlock(&journal->j_state_lock);
+		wake_up(&journal->j_wait_checkpoint);
+		wait_event(journal->j_wait_done_checkpoint,
+			 jbd2_log_space_left(journal) >= nblocks);
+		write_lock(&journal->j_state_lock);
+		return;
+	}
+#endif
 	while (jbd2_log_space_left(journal) < nblocks) {
 		write_unlock(&journal->j_state_lock);
 		mutex_lock_io(&journal->j_checkpoint_mutex);
@@ -153,6 +171,12 @@ int jbd2_log_do_checkpoint(journal_t *journal)
 	tid_t			this_tid;
 	int			result, batch_count = 0;
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+	if (journal->j_flags & JBD2_EXT4_TAU_JOURNAL) {
+		pr_warn("[%s] must not be called!",__func__);
+		return -EIO;
+	}
+#endif
 	jbd2_debug(1, "Start checkpoint\n");
 
 	/*
@@ -702,5 +726,13 @@ void __jbd2_journal_drop_transaction(journal_t *journal, transaction_t *transact
 
 	trace_jbd2_drop_transaction(journal, transaction);
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+	tjk_debug("Dropping transaction %d\n", transaction->t_tid);
+	if(journal->j_checkpoint_transactions)
+		tj_debug("next transaction %d\n",
+			 journal->j_checkpoint_transactions->t_tid);
+	else
+		tj_debug("no next transaction\n");
+#endif
 	jbd2_debug(1, "Dropping transaction %d, all done\n", transaction->t_tid);
 }

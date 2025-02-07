@@ -34,6 +34,14 @@
 #define EXT4_IOC_GETFSUUID		_IOR('f', 44, struct fsuuid)
 #define EXT4_IOC_SETFSUUID		_IOW('f', 44, struct fsuuid)
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL_ATOMIC_FILE
+/* support atomic write */
+#define EXT4_IOC_START_ATOMIC_WRITE	_IO('f', 45)
+#define EXT4_IOC_COMMIT_ATOMIC_WRITE	_IO('f', 46)
+#define EXT4_IOC_ABORT_ATOMIC_WRITE	_IO('f', 47)
+#define EXT4_IOC_GET_FEATURES		_IOR('f', 48, __u32)
+#endif
+
 #define EXT4_IOC_SHUTDOWN _IOR('X', 125, __u32)
 
 /*

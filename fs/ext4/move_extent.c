@@ -596,6 +596,15 @@ ext4_move_extents(struct file *o_filp, struct file *d_filp, __u64 orig_blk,
 		return -EOPNOTSUPP;
 	}
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+	if (ext4_should_tjournal(orig_inode) ||
+	    ext4_should_tjournal(donor_inode)) {
+		ext4_msg(orig_inode->i_sb, KERN_ERR,
+			 "Online defrag not supported with tau journaling");
+		return -EOPNOTSUPP;
+	}
+#endif
+
 	if (IS_ENCRYPTED(orig_inode) || IS_ENCRYPTED(donor_inode)) {
 		ext4_msg(orig_inode->i_sb, KERN_ERR,
 			 "Online defrag not supported for encrypted files");

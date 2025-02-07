@@ -488,6 +488,34 @@ size_t copy_page_from_iter_atomic(struct page *page, size_t offset,
 }
 EXPORT_SYMBOL(copy_page_from_iter_atomic);
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL_ATOMIC_FILE
+size_t copy_page_from_iter_atomic_kern(struct page *page, unsigned offset, size_t bytes,
+					  struct iov_iter *i, const char *data)
+{
+	char *kaddr = kmap_local_page(page), *p = kaddr + offset;
+	if (!page_copy_sane(page, offset, bytes)) {
+		kunmap_local(kaddr);
+		return 0;
+	}
+	if (WARN_ON_ONCE(!i->data_source)) {
+		kunmap_local(kaddr);
+		return 0;
+	}
+
+	if (unlikely(i->count < bytes))
+		bytes = i->count;
+	if (likely(bytes)) {
+		memcpy(p, data + i->iov_offset, bytes);
+		i->iov_offset += bytes;
+		i->count -= bytes;
+	}
+
+	kunmap_local(kaddr);
+	return bytes;
+}
+EXPORT_SYMBOL(copy_page_from_iter_atomic_kern);
+#endif
+
 static void iov_iter_bvec_advance(struct iov_iter *i, size_t size)
 {
 	const struct bio_vec *bvec, *end;

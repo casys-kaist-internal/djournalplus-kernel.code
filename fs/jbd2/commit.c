@@ -26,6 +26,10 @@
 #include <linux/bitops.h>
 #include <trace/events/jbd2.h>
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+#include "../ext4/tau_journal.h"
+#endif
+
 /*
  * IO end handler for temporary buffer_heads handling writes to the journal.
  */
@@ -317,6 +321,19 @@ static void write_tag_block(journal_t *j, journal_block_tag_t *tag,
 		tag->t_blocknr_high = cpu_to_be32((block >> 31) >> 1);
 }
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+static void write_da_tag_block(journal_t *j, journal_block_tag_da_t *tag,
+				   struct buffer_head *bh)
+{
+	struct page *page = bh->b_page;
+	pgoff_t pgidx = page->index;
+
+	tag->t_pgidx = cpu_to_be32(pgidx & (u32)~0);
+	if (jbd2_has_feature_64bit(j))
+		tag->t_pgidx_high = cpu_to_be32((pgidx >> 31) >> 1);
+}
+#endif
+
 static void jbd2_block_tag_csum_set(journal_t *j, journal_block_tag_t *tag,
 				    struct buffer_head *bh, __u32 sequence)
 {
@@ -375,6 +392,10 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 	int csum_size = 0;
 	LIST_HEAD(io_bufs);
 	LIST_HEAD(log_bufs);
+
+	/* Note: tag_bytes: 16bytes
+	 *       We can reuse temp buffer_head used for committin
+	 *       This is freed by free_buffer_head() */
 
 	if (jbd2_journal_has_csum_v2or3(journal))
 		csum_size = sizeof(struct jbd2_journal_block_tail);
@@ -454,6 +475,13 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 	jbd2_journal_wait_updates(journal);
 
 	commit_transaction->t_state = T_SWITCH;
+
+#ifdef EXT4_JP_ALLOC_ON_COMMIT
+	if (journal->j_pre_commit_callback)
+		journal->j_pre_commit_callback(journal, commit_transaction);
+
+	J_ASSERT(!atomic_read(&commit_transaction->t_updates));
+#endif
 
 	J_ASSERT (atomic_read(&commit_transaction->t_outstanding_credits) <=
 			journal->j_max_transaction_buffers);
@@ -679,7 +707,19 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 			tag_flag |= JBD2_FLAG_SAME_UUID;
 
 		tag = (journal_block_tag_t *) tagp;
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+		/* Apply delayed allocation for data jounraling, leverage tag structure */
+		if (buffer_delay(jh2bh(jh))) {
+			tag_flag |= JBD2_FLAG_DELAYED;
+			write_da_tag_block(journal, (journal_block_tag_da_t *)tag,
+											jh2bh(jh));
+		} else
+			write_tag_block(journal, tag, jh2bh(jh)->b_blocknr);
+		tjc__debug("Add bh(%d) at %llu\n", (int)jh2bh(jh)->b_blocknr,
+				wbuf[bufs]->b_blocknr);
+#else
 		write_tag_block(journal, tag, jh2bh(jh)->b_blocknr);
+#endif
 		tag->t_flags = cpu_to_be16(tag_flag);
 		jbd2_block_tag_csum_set(journal, tag, wbuf[bufs],
 					commit_transaction->t_tid);
@@ -1148,6 +1188,14 @@ restart_loop:
 	wake_up(&journal->j_wait_done_commit);
 	wake_up(&journal->j_fc_wait);
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+    tjk_debug("Finish commit Tx(%u) data blocks(%u)--%uKiB total blocks(%u).\n"
+           "     	 Journal area info: left blocks(%lu/%luMiB) total blocks(%d/%luMB).\n\n",
+        commit_transaction->t_tid, stats.run.rs_blocks, (stats.run.rs_blocks * journal->j_blocksize) >> 10,
+		stats.run.rs_blocks_logged,
+        jbd2_log_space_left(journal), (jbd2_log_space_left(journal) * journal->j_blocksize) >> 20,
+		journal->j_total_len, ((unsigned long)journal->j_total_len * journal->j_blocksize) >> 20);
+#endif
 	/*
 	 * Calculate overall stats
 	 */

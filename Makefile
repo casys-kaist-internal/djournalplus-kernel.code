@@ -2,7 +2,7 @@
 VERSION = 6
 PATCHLEVEL = 8
 SUBLEVEL = 0
-EXTRAVERSION =
+EXTRAVERSION = tjournal
 NAME = Hurr durr I'ma ninja sloth
 
 # *DOCUMENTATION*

@@ -118,3 +118,18 @@ config EXT4_KUNIT_TESTS
 	  to the KUnit documentation in Documentation/dev-tools/kunit/.
 
 	  If unsure, say N.
+
+config EXT4_TAU_JOURNAL
+    bool "TAU-Journaling mode supports"
+    depends on EXT4_FS
+    default y
+
+config EXT4_TAU_JOURNAL_ATOMIC_FILE
+    bool "TAU-Journaling provide atomic write for single file"
+    depends on EXT4_TAU_JOURNAL
+    default n
+
+config EXT4_JP_ALLOC_ON_COMMIT
+    bool "Prevent data loss due to delayed allocation"
+    depends on EXT4_FS
+    default n

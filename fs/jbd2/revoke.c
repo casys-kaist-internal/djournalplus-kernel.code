@@ -92,6 +92,10 @@
 #include <linux/hash.h>
 #endif
 
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+#include "../ext4/tau_journal.h"
+#endif
+
 static struct kmem_cache *jbd2_revoke_record_cache;
 static struct kmem_cache *jbd2_revoke_table_cache;
 
@@ -615,6 +619,10 @@ static void write_one_revoke_record(transaction_t *transaction,
 		/* Record it so that we can wait for IO completion later */
 		BUFFER_TRACE(descriptor, "file in log_bufs");
 		jbd2_file_log_bh(log_bufs, descriptor);
+
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+		tj_debug("revoke block(%llu)\n", descriptor->b_blocknr);
+#endif
 
 		offset = sizeof(jbd2_journal_revoke_header_t);
 		*descriptorp = descriptor;
