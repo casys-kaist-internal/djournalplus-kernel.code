@@ -71,7 +71,7 @@ bool tjournal_try_to_free_buffers(struct folio *folio)
 		journal_t *journal = EXT4_JOURNAL(folio->mapping->host);
 		return jbd2_journal_try_to_free_buffers(journal, folio);
 	}
-	
+
 	if (S_ISDIR(inode->i_mode))
 		return false;
 
@@ -80,7 +80,7 @@ bool tjournal_try_to_free_buffers(struct folio *folio)
 	return ret;
 }
 
-static inline void __buffer_unlink_first(struct journal_head *jh)
+static inline void tjournal_buffer_unlink(struct journal_head *jh)
 {
 	transaction_t *transaction = jh->b_cp_transaction;
 
@@ -93,7 +93,8 @@ static inline void __buffer_unlink_first(struct journal_head *jh)
 	}
 }
 
-static void __flush_batch(journal_t *journal, int *batch_count)
+/* Do we need to care about race of dirty state like __flush_batch() in jbd2? */
+static void tjournal_flush_batch(journal_t *journal, int *batch_count)
 {
 	int i;
 	struct blk_plug plug;
@@ -103,6 +104,7 @@ static void __flush_batch(journal_t *journal, int *batch_count)
 	for (i = 0; i < *batch_count; i++) {
 		bh = journal->tjournal_chkpt_bhs[i];
 		lock_buffer(bh);
+		clear_buffer_taudirty(bh);
 		bh->b_end_io = end_buffer_write_sync;
 		get_bh(bh);
 		submit_bh(REQ_OP_WRITE | REQ_SYNC, bh);
@@ -131,6 +133,7 @@ int tjournal_writepages(struct address_space *mapping)
 
 static int tjournal_start_checkpoint(journal_t *journal)
 {
+	struct super_block *sb = journal->j_private;
 	struct journal_head *jh;
 	struct buffer_head *bh;
 	transaction_t *transaction;
@@ -171,39 +174,6 @@ restart:
 		jh = transaction->t_checkpoint_list;
 		bh = jh2bh(jh);
 
-		// tj_debug("checkpoint block(%d)\n", (int)bh->b_blocknr);
-		if (buffer_locked(bh)) {
-			tj_debug("wait on buffer\n");
-			get_bh(bh);
-			spin_unlock(&journal->j_list_lock);
-			wait_on_buffer(bh);
-			__brelse(bh);
-			goto retry;
-		}
-
-		/* We need to allocate delayed data blocks here */
-		if (buffer_delay(bh)) {
-			tj_debug("delayed block(%lu) require allocation!\n",
-				 bh->b_page->index);
-			get_bh(bh);
-			spin_unlock(&journal->j_list_lock);
-			if (delayed == bh->b_page->index) {
-				pr_err("da not worked by writepages %lu\n",
-				       bh->b_page->index);
-			}
-			BUG_ON(delayed == bh->b_page->index);
-			BUG_ON(bh->b_page->mapping == NULL);
-			mutex_unlock(&journal->j_checkpoint_mutex);
-			ihold(bh->b_page->mapping->host);
-			tjournal_writepages(bh->b_page->mapping);
-			iput(bh->b_page->mapping->host);
-			mutex_lock_io(&journal->j_checkpoint_mutex);
-			// TODO: error handling
-			delayed = bh->b_page->index;
-			__brelse(bh);
-			goto retry;
-		}
-
 		/* If this buffer involved in current transcation */
 		if (jh->b_transaction != NULL) {
 			transaction_t *t = jh->b_transaction;
@@ -223,7 +193,7 @@ restart:
 				       (unsigned long long)bh->b_blocknr);
 
 			if (batch_count)
-				__flush_batch(journal, &batch_count);
+				tjournal_flush_batch(journal, &batch_count);
 			jbd2_log_start_commit(journal, tid);
 			/*
 			 * jbd2_journal_commit_transaction() may want
@@ -240,23 +210,66 @@ restart:
 			goto restart;
 		}
 
-		if (!buffer_taudirty(bh)) {
-			// tj_debug("not dirty remove it\n");
+		// tj_debug("checkpoint block(%d) bh(%p)\n", (int)bh->b_blocknr, bh);
+		if (!trylock_buffer(bh)) {
+			tj_debug("wait on buffer\n");
+			get_bh(bh);
+			spin_unlock(&journal->j_list_lock);
+			wait_on_buffer(bh);
+			__brelse(bh);
+			goto retry;
+		} /* We need to allocate delayed data blocks here */
+		else if (buffer_delay(bh)) {
+			tj_debug("delayed block(%lu) require allocation!\n",
+				 bh->b_page->index);
+			unlock_buffer(bh);
+			get_bh(bh);
+			spin_unlock(&journal->j_list_lock);
+			if (batch_count)
+				tjournal_flush_batch(journal, &batch_count);
+
+			if (delayed == bh->b_page->index) {
+				pr_err("da not worked by writepages %lu\n",
+				       bh->b_page->index);
+			}
+			BUG_ON(delayed == bh->b_page->index);
+			BUG_ON(bh->b_page->mapping == NULL);
+			mutex_unlock(&journal->j_checkpoint_mutex);
+			/* If filesystem alive, it file can be deleted so that we prevent inode be free */
+			if (sb->s_flags & SB_ACTIVE) {
+				ihold(bh->b_page->mapping->host);
+				tjournal_writepages(bh->b_page->mapping);
+				iput(bh->b_page->mapping->host);
+			}
+			/* Otherwise, it is on umounting */
+			else {
+				tjournal_writepages(bh->b_page->mapping);
+			}
+			mutex_lock_io(&journal->j_checkpoint_mutex);
+			delayed = bh->b_page->index; // this is for only error handling, remove later
+			__brelse(bh);
+			goto retry;
+		} else if (!buffer_taudirty(bh)) {
+			tj_debug("not dirty block(%llu)\n", bh->b_blocknr);
+			unlock_buffer(bh);
 			if (__jbd2_journal_remove_checkpoint(jh))
 				/* The transaction was released; we're done */
 				goto out;
 			continue;
-		} else
-			clear_buffer_taudirty(bh); /* Let's do writeback */
+		} else {
+			/* Let's do writeback */
+			unlock_buffer(bh);
+			BUFFER_TRACE(bh, "queue");
+			get_bh(bh);
+			J_ASSERT_BH(bh, !buffer_jwrite(bh));
+			journal->tjournal_chkpt_bhs[batch_count++] = bh;
+			transaction->t_chp_stats.cs_written++;
+			transaction->t_checkpoint_list = jh->b_cpnext;
+		}
 
-		// tj_debug("queing block(%d)\n", (int)bh->b_blocknr);
-		BUFFER_TRACE(bh, "queue");
-		get_bh(bh);
-		J_ASSERT_BH(bh, !buffer_jwrite(bh));
-		journal->tjournal_chkpt_bhs[batch_count++] = bh;
-		transaction->t_chp_stats.cs_written++;
-		if ((batch_count == JBD2_NR_BATCH) || need_resched() ||
-		    spin_needbreak(&journal->j_list_lock))
+		if ((batch_count == JBD2_NR_BATCH) ||
+			need_resched() || spin_needbreak(&journal->j_list_lock) ||
+			jh2bh(transaction->t_checkpoint_list) == journal->tjournal_chkpt_bhs[0])
 			goto unlock_and_flush;
 	}
 
@@ -265,7 +278,7 @@ unlock_and_flush:
 		spin_unlock(&journal->j_list_lock);
 retry:
 		if (batch_count)
-			__flush_batch(journal, &batch_count);
+			tjournal_flush_batch(journal, &batch_count);
 		spin_lock(&journal->j_list_lock);
 		goto restart;
 	}

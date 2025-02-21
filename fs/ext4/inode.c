@@ -1050,13 +1050,15 @@ int do_journal_get_write_access(handle_t *handle, struct inode *inode,
 }
 
 #ifdef CONFIG_EXT4_TAU_JOURNAL
-int jp_do_journal_get_write_access(handle_t *handle, struct inode *inode,
+static int jp_do_journal_get_write_access(handle_t *handle, struct inode *inode,
 				struct buffer_head *bh)
 {
 	// (junbong): Copy from do_journal_get_write_access
 	int dirty = buffer_dirty(bh);
 	int ret;
 
+	tjh_debug("bh(%llu) inode(%lu) index(%lu) nr(%d) dirty? %d",
+			bh->b_blocknr, inode->i_ino, bh->b_folio->index, bh->b_folio->_folio_nr_pages, dirty);
 // 	if (buffer_delay(bh)) {
 // 		/*
 // 		 * (junbong): We don't want to journal dealloc blocks(selective journalling).
@@ -1358,6 +1360,22 @@ static int ext4_tjournal_write_begin(struct file *file, struct address_space *ma
 
 	return ret;
 }
+
+/*  Since 6.8 use ext4_dirty_journalled_data(), which is not used in our version
+ *  We need to use old version of write_end_fn() */
+static int tjournal_write_end_fn(handle_t *handle, struct inode *inode,
+			struct buffer_head *bh)
+{
+	int ret;
+	if (!buffer_mapped(bh) || buffer_freed(bh))
+		return 0;
+	set_buffer_uptodate(bh);
+	ret = ext4_handle_dirty_metadata(handle, NULL, bh);
+	clear_buffer_meta(bh);
+	clear_buffer_prio(bh);
+	return ret;
+}
+
 #endif /* CONFIG_EXT4_TAU_JOURNAL */
 
 /* For write_end() in data=journal mode */
@@ -1522,7 +1540,7 @@ static int ext4_tjournal_write_end(struct file *file,
 
 		ret = ext4_walk_page_buffers(handle, inode, page_buffers(page),
 					     from, from + copied, &partial,
-					     write_end_fn);
+					     tjournal_write_end_fn);
 		if (!partial)
 			SetPageUptodate(page);
 	}
@@ -3125,14 +3143,15 @@ static int ext4_writepages(struct address_space *mapping,
  * 	This function should not be called when using tau-journaling
  *  VM subsystem may call this function when it needs to write dirty pages
  *  However, we do not rely on writeback by VM subsystem for filesystem.
- *  For error handling & compatibility, we just return error.
+ *
+ *  @note: mark_inode_dirty() may register inode to be dirtied, then
+ *         this function will be called, we just return 0 for compatibility.
  *
  */
 static int ext4_unused_tjournal_writepages(struct address_space *mapping,
 			   struct writeback_control *wbc)
 {
-	pr_err("ext4_unused_tjournal_writepages called\n");
-	return -EINVAL;
+	return 0;
 }
 
 static unsigned tjournal_lookup_da_range(struct folio_batch *fbatch,

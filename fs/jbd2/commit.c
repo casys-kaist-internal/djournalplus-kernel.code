@@ -393,6 +393,8 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 	LIST_HEAD(io_bufs);
 	LIST_HEAD(log_bufs);
 
+	tjc_debug("\njbd2_journal_commit_transaction\n");
+
 	/* Note: tag_bytes: 16bytes
 	 *       We can reuse temp buffer_head used for committin
 	 *       This is freed by free_buffer_head() */
@@ -454,6 +456,10 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 	trace_jbd2_start_commit(journal, commit_transaction);
 	jbd2_debug(1, "JBD2: starting commit of transaction %d\n",
 			commit_transaction->t_tid);
+
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+	tjc_debug("JBD2: Starting commit tx(%d)\n", commit_transaction->t_tid);
+#endif
 
 	write_lock(&journal->j_state_lock);
 	journal->j_fc_off = 0;
@@ -598,6 +604,10 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 
 	J_ASSERT(commit_transaction->t_nr_buffers <=
 		 atomic_read(&commit_transaction->t_outstanding_credits));
+
+#ifdef CONFIG_EXT4_TAU_JOURNAL
+	tjc__debug("commit phase start\n");
+#endif
 
 	err = 0;
 	bufs = 0;

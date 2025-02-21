@@ -2105,7 +2105,7 @@ static void __jbd2_journal_temp_unlink_buffer(struct journal_head *jh)
 		clear_buffer_jbddirty(bh);
 	else if (test_clear_buffer_jbddirty(bh)) {
 #ifdef CONFIG_EXT4_TAU_JOURNAL
-		// tjc_debug("buffer(%d) being unlinked\n", (int)bh->b_blocknr);
+		tjc_debug("buffer(%d) being unlinked %p\n", (int)bh->b_blocknr, bh);
 		/* We don't need to do already journalled */
 		if (buffer_taudirty(bh)) {
 			// tj_debug("already dirty\n");
@@ -2124,6 +2124,7 @@ static void __jbd2_journal_temp_unlink_buffer(struct journal_head *jh)
 			/* Filesystem's metadata (superblock, bitmap and etc ...) */
 			if (S_ISBLK(inode->i_mode)) {
 				// tj_debug("metadata block\n");
+				// directory entry is considered as metadata in filesystem
 				set_buffer_taudirty(bh);
 				return;
 			}
@@ -2402,8 +2403,8 @@ static int journal_unmap_buffer(journal_t *journal, struct buffer_head *bh,
 		*       so, if there exist some blocks in this code, that might be a bug.
 		*/
 		if (buffer_taudirty(bh)) {
+			tjk_debug("block(%llu) unmapped\n", bh->b_blocknr);
 			clear_buffer_taudirty(bh);
-			// tjk_debug("block(%llu) unmapped\n", bh->b_blocknr);
 			/* Checking for bug (later this will be deleted) */
 			if (buffer_delay(bh)) {
 				struct inode *inode = bh->b_page->mapping->host;
@@ -2617,6 +2618,9 @@ void __jbd2_journal_file_buffer(struct journal_head *jh,
 
 	lockdep_assert_held(&jh->b_state_lock);
 	assert_spin_locked(&transaction->t_journal->j_list_lock);
+
+	tjh_debug("buffer(%d) file on transaction(%d) list(%d)\n",
+		  (int)bh->b_blocknr, transaction->t_tid, jlist);
 
 	J_ASSERT_JH(jh, jh->b_jlist < BJ_Types);
 	J_ASSERT_JH(jh, jh->b_transaction == transaction ||

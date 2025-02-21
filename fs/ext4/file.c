@@ -421,7 +421,10 @@ again:
 		index++;
 	} while (iov_iter_count(i));
 
-	return written ? written : status;
+	if (!written)
+		return status;
+	iocb->ki_pos += written;
+	return written;
 }
 
 /**
